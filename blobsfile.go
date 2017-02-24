@@ -75,7 +75,9 @@ var (
 )
 
 type CorruptedError struct {
-	blobs []*BlobPos
+	blobs  []*BlobPos
+	offset int64
+	err    error
 }
 
 func (ce *CorruptedError) Blobs() []*BlobPos {
@@ -83,20 +85,27 @@ func (ce *CorruptedError) Blobs() []*BlobPos {
 }
 
 func (ce *CorruptedError) Error() string {
-	return fmt.Sprintf("%d blobs are corrupt", len(ce.blobs))
-}
-
-func (ce *CorruptedError) FirstBadOffset() int {
 	if len(ce.blobs) > 0 {
-		return ce.blobs[0].offset
+		return fmt.Sprintf("%d blobs are corrupt", len(ce.blobs))
 	}
-	return 0
+	return fmt.Sprintf("corrupted at offset %d: %v", ce.offset, ce.err)
 }
 
-func firstCorruptedShard(offset, shardSize int) int {
+func (ce *CorruptedError) FirstBadOffset() int64 {
+	if len(ce.blobs) > 0 {
+		off := int64(ce.blobs[0].offset)
+		if ce.offset == -1 || off < ce.offset {
+			return off
+		}
+	}
+	return ce.offset
+}
+
+func firstCorruptedShard(offset int64, shardSize int) int {
 	i := 0
+	ioffset := int(offset)
 	for {
-		if shardSize+(shardSize*i) > offset {
+		if shardSize+(shardSize*i) > ioffset {
 			return i
 		}
 		i++
@@ -164,7 +173,7 @@ func New(dir string, maxBlobsFileSize int64, compression bool, wg sync.WaitGroup
 	}
 
 	// Initialize the Reed-Solomon encoder
-	enc, err := reedsolomon.New(10, 4)
+	enc, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		return nil, err
 	}
@@ -249,11 +258,11 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 		return err
 	}
 
-	finfo, err := blobsfile.Stat()
-	if err != nil {
-		return err
-	}
-	fmt.Printf("size=%d\n", finfo.Size())
+	// finfo, err := blobsfile.Stat()
+	// if err != nil {
+	// 	return err
+	// }
+	// fmt.Printf("size=%d\n", finfo.Size())
 
 	blobsIndexed := 0
 
@@ -268,10 +277,10 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 			if err == io.EOF {
 				break
 			}
-			return fmt.Errorf("failed to read hash: %v", err)
+			return &CorruptedError{nil, offset, fmt.Errorf("failed to read hash: %v", err)}
 		}
 		if _, err := blobsfile.Read(flags); err != nil {
-			return fmt.Errorf("failed to read flag: %v", err)
+			return &CorruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
 		// fmt.Printf("flag=%v\n", flags)
 		// If we reached the EOF blob, break
@@ -279,13 +288,13 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 			break
 		}
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
-			return fmt.Errorf("failed to read blob size: %v", err)
+			return &CorruptedError{nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
 		}
 		blobSize := int64(binary.LittleEndian.Uint32(blobSizeEncoded))
 		rawBlob := make([]byte, int(blobSize))
 		read, err := blobsfile.Read(rawBlob)
 		if err != nil || read != int(blobSize) {
-			return fmt.Errorf("error while reading raw blob: %v", err)
+			return &CorruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
 		}
 		// XXX(tsileo): optional flag to `BlobPos`?
 		blobPos := &BlobPos{n: n, offset: int(offset), size: int(blobSize)}
@@ -294,7 +303,7 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 		if backend.snappyCompression {
 			blobDecoded, err := snappy.Decode(nil, rawBlob)
 			if err != nil {
-				return fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)
+				return &CorruptedError{nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
 			}
 			blob = blobDecoded
 		} else {
@@ -317,7 +326,7 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 		}
 	}
 	if len(corrupted) > 0 {
-		return &CorruptedError{corrupted}
+		return &CorruptedError{corrupted, -1, nil}
 	}
 	return nil
 }
@@ -331,35 +340,35 @@ func copyShards(i [][]byte) (o [][]byte) {
 	return o
 }
 func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
-	parityShards, err := backend.parityShards(n)
+	pShards, err := backend.parityShards(n)
 	if err != nil {
 		// TODO(tsileo): log the error
 		fmt.Printf("parity shards err=%v\n", err)
 	}
-	parityCnt := len(parityShards)
+	parityCnt := len(pShards)
 	err = backend.scanBlobsFile(n, nil)
 	fmt.Printf("scan result=%v\n", err)
-	if err == nil && (parityShards == nil || len(parityShards) != 4) {
+	if err == nil && (pShards == nil || len(pShards) != parityShards) {
 		// We can rebuild the parity blobs if needed
 		// FIXME(tsileo): do it
 	}
-	if err != nil && (parityShards == nil || len(parityShards) == 0) {
+	if err != nil && (pShards == nil || len(pShards) == 0) {
 		return fmt.Errorf("no parity shards available, can't recover")
 	}
 	if err == nil {
 		fmt.Printf("noting to repair")
 		return nil
 	}
-	if parityShards == nil || len(parityShards) != 4 {
+	if pShards == nil || len(pShards) != parityShards {
 		var l int
-		if parityShards != nil {
-			l = len(parityShards)
+		if pShards != nil {
+			l = len(pShards)
 		} else {
-			parityShards = [][]byte{}
+			pShards = [][]byte{}
 		}
 
-		for i := 0; i < 4-l; i++ {
-			parityShards = append(parityShards, nil)
+		for i := 0; i < parityShards-l; i++ {
+			pShards = append(pShards, nil)
 		}
 	}
 	dataShardIndex := 0
@@ -367,7 +376,7 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 		if cerr, ok := err.(*CorruptedError); ok {
 			badOffset := cerr.FirstBadOffset()
 			fmt.Printf("badOffset: %v\n", badOffset)
-			dataShardIndex = firstCorruptedShard(badOffset, int(backend.maxBlobsFileSize)/10)
+			dataShardIndex = firstCorruptedShard(badOffset, int(backend.maxBlobsFileSize)/dataShards)
 			fmt.Printf("dataShardIndex=%d\n", dataShardIndex)
 		}
 	}
@@ -376,13 +385,13 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 		missing = append(missing, i)
 	}
 	fmt.Printf("missing=%+v\n", missing)
-	dataShards, err := backend.dataShards(n)
+	dShards, err := backend.dataShards(n)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("try #1\n")
 	if len(missing) <= parityCnt {
-		shards := copyShards(append(dataShards, parityShards...))
+		shards := copyShards(append(dShards, pShards...))
 		for _, idx := range missing {
 			shards[idx] = nil
 		}
@@ -404,7 +413,7 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 	fmt.Printf("try #2\n")
 	// Try one missing shards
 	for i := dataShardIndex; i < 10; i++ {
-		shards := copyShards(append(dataShards, parityShards...))
+		shards := copyShards(append(dShards, pShards...))
 		shards[i] = nil
 		if err := backend.rse.Reconstruct(shards); err != nil {
 			return err
@@ -421,13 +430,13 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 	}
 
 	fmt.Printf("try #3\n")
-	if len(parityShards) >= 2 {
+	if len(pShards) >= 2 {
 		for i := dataShardIndex; i < 10; i++ {
 			for j := dataShardIndex; j < 10; j++ {
 				if j == i {
 					continue
 				}
-				shards := copyShards(append(dataShards, parityShards...))
+				shards := copyShards(append(dShards, pShards...))
 				// fmt.Printf("setting i=%d,j=%d to nil\n", i, j)
 				shards[i] = nil
 				shards[j] = nil
@@ -448,7 +457,7 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 	}
 
 	fmt.Printf("try #4\n")
-	if len(parityShards) >= 3 {
+	if len(pShards) >= 3 {
 		for i := dataShardIndex; i < 10; i++ {
 			for j := dataShardIndex; j < 10; j++ {
 				for k := dataShardIndex; k < 10; k++ {
@@ -456,7 +465,7 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 						continue
 					}
 					// fmt.Printf("setting i=%d,j=%d,k=%d to nil\n", i, j, k)
-					shards := copyShards(append(dataShards, parityShards...))
+					shards := copyShards(append(dShards, pShards...))
 					shards[i] = nil
 					shards[j] = nil
 					shards[k] = nil
@@ -504,8 +513,7 @@ func (backend *BlobsFileBackend) parityShards(n int) ([][]byte, error) {
 	}
 	blobsfile := backend.files[n]
 	parityBlobs := [][]byte{}
-	// shardIndex := 10
-	for i := 0; i < 4; i++ {
+	for i := 0; i < parityShards; i++ {
 		blobHash := make([]byte, hashSize)
 		blobSizeEncoded := make([]byte, 4)
 		flags := make([]byte, 1)
@@ -760,7 +768,7 @@ func (backend *BlobsFileBackend) writeParityBlobs() error {
 	}
 
 	// Save the parity blobs
-	parityBlobs := shards[10:len(shards)]
+	parityBlobs := shards[dataShards:len(shards)]
 	for _, parityBlob := range parityBlobs {
 		_, parityBlobEncoded := backend.encodeBlob(parityBlob, ParityBlob)
 
