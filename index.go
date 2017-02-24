@@ -30,9 +30,9 @@ func formatKey(prefix byte, bkey []byte) []byte {
 
 func opts() *kv.Options {
 	return &kv.Options{
-		VerifyDbBeforeOpen:  true,
+		VerifyDbBeforeOpen:  false,
 		VerifyDbAfterOpen:   true,
-		VerifyDbBeforeClose: true,
+		VerifyDbBeforeClose: false,
 		VerifyDbAfterClose:  true,
 	}
 }

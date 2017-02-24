@@ -10,6 +10,7 @@ It draws inspiration from Facebook's [Haystack](http://202.118.11.61/papers/case
 
 ## Features
 
- - Append-only
+ - Durable (data is fsynced before returning)
+ - Append-only (can't mutate data)
  - Extra parity data is added to each BlobFile (using Reed-Solomon error correction), allowing the database to repair itself in case of corruption.
 

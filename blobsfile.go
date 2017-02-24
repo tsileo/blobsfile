@@ -54,10 +54,19 @@ const (
 	blobOverhead = 37
 	hashSize     = 32
 
-	parityShards = 2  // 2 parity shards for Reed-Solomon config
-	dataShards   = 10 // 10 data shards for Reed-Solomon config
+	// Reed-Solomon config
+	parityShards = 2  // 2 parity shards
+	dataShards   = 10 // 10 data shards
 
 	defaultMaxBlobsFileSize = 256 << 20 // 256MB
+)
+
+const (
+	// Blob flags
+	Blob byte = 1 << iota
+	Compressed
+	ParityBlob
+	EOF
 )
 
 var (
@@ -112,14 +121,6 @@ func firstCorruptedShard(offset int64, shardSize int) int {
 	}
 	return 0
 }
-
-// Blob flags
-const (
-	Blob byte = 1 << iota
-	Compressed
-	ParityBlob
-	EOF
-)
 
 // Holds all the backend data
 // FIXME(tsileo): BlobsFileBackend => BlobsFiles
@@ -248,21 +249,17 @@ func (backend *BlobsFileBackend) String() string {
 
 func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, byte, string, []byte) error) error {
 	corrupted := []*BlobPos{}
+
 	err := backend.ropen(n)
 	if err != nil {
 		return err
 	}
+
 	offset := int64(headerSize)
 	blobsfile := backend.files[n]
 	if _, err := blobsfile.Seek(int64(headerSize), os.SEEK_SET); err != nil {
 		return err
 	}
-
-	// finfo, err := blobsfile.Stat()
-	// if err != nil {
-	// 	return err
-	// }
-	// fmt.Printf("size=%d\n", finfo.Size())
 
 	blobsIndexed := 0
 
@@ -282,7 +279,6 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 		if _, err := blobsfile.Read(flags); err != nil {
 			return &CorruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
-		// fmt.Printf("flag=%v\n", flags)
 		// If we reached the EOF blob, break
 		if flags[0] == EOF {
 			break
@@ -325,9 +321,11 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 			corrupted = append(corrupted, blobPos)
 		}
 	}
+
 	if len(corrupted) > 0 {
 		return &CorruptedError{corrupted, -1, nil}
 	}
+
 	return nil
 }
 
@@ -339,6 +337,7 @@ func copyShards(i [][]byte) (o [][]byte) {
 	}
 	return o
 }
+
 func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 	pShards, err := backend.parityShards(n)
 	if err != nil {
@@ -429,6 +428,7 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 		}
 	}
 
+	// TODO(tsileo): only do this check if the two parity blobs are here
 	fmt.Printf("try #3\n")
 	if len(pShards) >= 2 {
 		for i := dataShardIndex; i < 10; i++ {
@@ -456,36 +456,6 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 		}
 	}
 
-	fmt.Printf("try #4\n")
-	if len(pShards) >= 3 {
-		for i := dataShardIndex; i < 10; i++ {
-			for j := dataShardIndex; j < 10; j++ {
-				for k := dataShardIndex; k < 10; k++ {
-					if (i == j) || (i == k) || (j == k) {
-						continue
-					}
-					// fmt.Printf("setting i=%d,j=%d,k=%d to nil\n", i, j, k)
-					shards := copyShards(append(dShards, pShards...))
-					shards[i] = nil
-					shards[j] = nil
-					shards[k] = nil
-					if err := backend.rse.Reconstruct(shards); err != nil {
-						return err
-					}
-					ok, err := backend.rse.Verify(shards)
-					if err != nil {
-						return err
-					}
-					if ok {
-						// FIXME(tsileo): update/fix the data
-						fmt.Printf("reconstruct successful\n")
-						return nil
-					}
-				}
-			}
-		}
-	}
-
 	// XXX(tsileo): support for 4 failed parity shards
 	return fmt.Errorf("failed to recover")
 }
@@ -507,7 +477,7 @@ func (backend *BlobsFileBackend) dataShards(n int) ([][]byte, error) {
 
 func (backend *BlobsFileBackend) parityShards(n int) ([][]byte, error) {
 	// FIXME(tsileo): try to read them backward if it fails (as we know the size will be maxBlobsFileSize/10), don't forget to reorder them
-	// Read the 4 parity shards at the ends of the file
+	// Read the 2 parity shards at the ends of the file
 	if _, err := backend.files[n].Seek(backend.maxBlobsFileSize, os.SEEK_SET); err != nil {
 		return nil, fmt.Errorf("failed to seek to parity shards: %v", err)
 	}
