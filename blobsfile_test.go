@@ -3,6 +3,8 @@ package blobsfile
 import (
 	"bytes"
 	"crypto/rand"
+	"fmt"
+	"io/ioutil"
 	mrand "math/rand"
 	"os"
 	"reflect"
@@ -88,23 +90,30 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 	b, err := New("./tmp_blobsfile_test", 16000000, false, sync.WaitGroup{})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
-	testParity(t, b, nil)
+	testParity(t, b, true, nil)
 	fname := b.filename(0)
 	b.Close()
-	// Corrupt the file
-	f, err := os.OpenFile(fname, os.O_RDWR|os.O_CREATE, 0755)
-	if err != nil {
-		panic(err)
-	}
+	// // Corrupt the file
+	// f, err := os.OpenFile(fname, os.O_RDWR, 0755)
+	// if err != nil {
+	// 	panic(err)
+	// }
 	// FIXME(tsileo): test this
 	// if _, err := f.Seek(defaultMaxBlobsFileSize/10*3, os.SEEK_SET); err != nil {
 	// if _, err := f.Seek(defaultMaxBlobsFileSize/10, os.SEEK_SET); err != nil {
-	if _, err := f.Seek(1000, os.SEEK_SET); err != nil {
+	// if _, err := f.Seek(16000000/10*2, os.SEEK_SET); err != nil {
+	data, err := ioutil.ReadFile(fname)
+	if err != nil {
 		panic(err)
 	}
-	f.Write([]byte("blobsfilelol"))
-	f.Sync()
-	f.Close()
+	punchOffset := int64(16000000/10*5) - 10
+	t.Logf("punch at %d\n", punchOffset)
+	fmt.Printf("punch at %d/%d\n", punchOffset, 16000000)
+	ndata := []byte("blobsfilelol")
+	copy(data[punchOffset:punchOffset+int64(len(ndata))], ndata)
+	if err := ioutil.WriteFile(fname, []byte(data), 0644); err != nil {
+		panic(err)
+	}
 	// Reopen the db
 	b, err = New("./tmp_blobsfile_test", 16000000, false, sync.WaitGroup{})
 	check(err)
@@ -113,7 +122,8 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 	cb := func(err error) error {
 		return b.checkBlobsFile(0)
 	}
-	testParity(t, b, cb)
+	testParity(t, b, false, cb)
+
 }
 
 func TestBlobsFileReedSolomonWithCompression(t *testing.T) {
@@ -121,16 +131,17 @@ func TestBlobsFileReedSolomonWithCompression(t *testing.T) {
 	check(err)
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
-	testParity(t, b, nil)
+	testParity(t, b, true, nil)
 }
 
-func testParity(t *testing.T, b *BlobsFileBackend, cb func(error) error) {
-	for i := 0; i < 31+10; i++ {
-		h, blob := randBlob(512000)
-		if err := b.Put(h, blob); err != nil {
-			panic(err)
+func testParity(t *testing.T, b *BlobsFileBackend, insert bool, cb func(error) error) {
+	if insert {
+		for i := 0; i < 31+10; i++ {
+			h, blob := randBlob(512000)
+			if err := b.Put(h, blob); err != nil {
+				panic(err)
+			}
 		}
-
 	}
 	if err := b.checkParityBlobs(0); err != nil {
 		if cb == nil {
