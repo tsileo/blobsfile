@@ -71,9 +71,11 @@ const (
 	EOF
 )
 
+type compressionAlg byte
+
 const (
 	// Supported compression algorithms
-	Snappy byte = 1 << iota
+	Snappy compressionAlg = 1
 )
 
 var (
@@ -130,11 +132,19 @@ func firstCorruptedShard(offset int64, shardSize int) int {
 }
 
 type Opts struct {
+	BlobsFileSize      int64
+	Directory          string
+	DisableCompression bool
+}
+
+func (o *Opts) init() {
+	if o.BlobsFileSize == 0 {
+		o.BlobsFileSize = defaultMaxBlobsFileSize
+	}
 }
 
 // Holds all the backend data
-// FIXME(tsileo): BlobsFileBackend => BlobsFiles
-type BlobsFileBackend struct {
+type BlobsFiles struct {
 	log log2.Logger
 	// Directory which holds the blobsfile
 	Directory string
@@ -165,8 +175,9 @@ type BlobsFileBackend struct {
 }
 
 // New intializes a new BlobsFileBackend
-// FIXME(tsileo): use a strict opts for helping keeping API compat
-func New(dir string, maxBlobsFileSize int64, compression bool, wg sync.WaitGroup) (*BlobsFileBackend, error) {
+func New(opts *Opts) (*BlobsFiles, error) {
+	opts.init()
+	dir := opts.Directory
 	// Try to create the directory
 	os.MkdirAll(dir, 0700)
 	var reindex bool
@@ -179,9 +190,6 @@ func New(dir string, maxBlobsFileSize int64, compression bool, wg sync.WaitGroup
 	if err != nil {
 		return nil, err
 	}
-	if maxBlobsFileSize == 0 {
-		maxBlobsFileSize = defaultMaxBlobsFileSize
-	}
 
 	// Initialize the Reed-Solomon encoder
 	enc, err := reedsolomon.New(dataShards, parityShards)
@@ -189,14 +197,13 @@ func New(dir string, maxBlobsFileSize int64, compression bool, wg sync.WaitGroup
 		return nil, err
 	}
 
-	backend := &BlobsFileBackend{
+	backend := &BlobsFiles{
 		Directory:         dir,
-		snappyCompression: compression,
+		snappyCompression: !opts.DisableCompression,
 		index:             index,
 		files:             make(map[int]*os.File),
-		maxBlobsFileSize:  maxBlobsFileSize,
+		maxBlobsFileSize:  opts.BlobsFileSize,
 		rse:               enc,
-		wg:                wg,
 		reindexMode:       reindex,
 	}
 	backend.log = logger.Log.New("backend", backend.String())
@@ -210,40 +217,40 @@ func New(dir string, maxBlobsFileSize int64, compression bool, wg sync.WaitGroup
 	return backend, nil
 }
 
-func (backend *BlobsFileBackend) IterOpenFiles() (files []*os.File) {
+func (backend *BlobsFiles) IterOpenFiles() (files []*os.File) {
 	for _, f := range backend.files {
 		files = append(files, f)
 	}
 	return files
 }
 
-func (backend *BlobsFileBackend) CloseOpenFiles() {
+func (backend *BlobsFiles) CloseOpenFiles() {
 	for _, f := range backend.files {
 		f.Close()
 	}
 }
 
-func (backend *BlobsFileBackend) Close() {
+func (backend *BlobsFiles) Close() {
 	backend.wg.Wait()
 	backend.log.Debug("closing index...")
 	backend.index.Close()
 }
 
 // Remove the index
-func (backend *BlobsFileBackend) RemoveIndex() {
+func (backend *BlobsFiles) RemoveIndex() {
 	backend.index.Remove()
 }
 
 // GetN returns the total numbers of BlobsFile
-func (backend *BlobsFileBackend) GetN() (int, error) {
+func (backend *BlobsFiles) GetN() (int, error) {
 	return backend.index.GetN()
 }
 
-func (backend *BlobsFileBackend) saveN() error {
+func (backend *BlobsFiles) saveN() error {
 	return backend.index.SetN(backend.n)
 }
 
-func (backend *BlobsFileBackend) restoreN() error {
+func (backend *BlobsFiles) restoreN() error {
 	n, err := backend.index.GetN()
 	if err != nil {
 		return err
@@ -253,11 +260,11 @@ func (backend *BlobsFileBackend) restoreN() error {
 }
 
 // Implements the Stringer interface
-func (backend *BlobsFileBackend) String() string {
+func (backend *BlobsFiles) String() string {
 	return fmt.Sprintf("blobsfile-%v", backend.Directory)
 }
 
-func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, byte, string, []byte) error) error {
+func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*BlobPos, byte, string, []byte) error) error {
 	corrupted := []*BlobPos{}
 
 	err := backend.ropen(n)
@@ -348,7 +355,7 @@ func copyShards(i [][]byte) (o [][]byte) {
 	return o
 }
 
-func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
+func (backend *BlobsFiles) checkBlobsFile(n int) error {
 	pShards, err := backend.parityShards(n)
 	if err != nil {
 		// TODO(tsileo): log the error
@@ -470,7 +477,7 @@ func (backend *BlobsFileBackend) checkBlobsFile(n int) error {
 	return fmt.Errorf("failed to recover")
 }
 
-func (backend *BlobsFileBackend) dataShards(n int) ([][]byte, error) {
+func (backend *BlobsFiles) dataShards(n int) ([][]byte, error) {
 	// Read the whole blobsfile data (except the parity blobs)
 	data := make([]byte, backend.maxBlobsFileSize)
 	if _, err := backend.files[n].ReadAt(data, 0); err != nil {
@@ -485,7 +492,7 @@ func (backend *BlobsFileBackend) dataShards(n int) ([][]byte, error) {
 	return shards[:10], nil
 }
 
-func (backend *BlobsFileBackend) parityShards(n int) ([][]byte, error) {
+func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 	// FIXME(tsileo): try to read them backward if it fails (as we know the size will be maxBlobsFileSize/10), don't forget to reorder them
 	// Read the 2 parity shards at the ends of the file
 	if _, err := backend.files[n].Seek(backend.maxBlobsFileSize, os.SEEK_SET); err != nil {
@@ -523,7 +530,7 @@ func (backend *BlobsFileBackend) parityShards(n int) ([][]byte, error) {
 	return parityBlobs, nil
 }
 
-func (backend *BlobsFileBackend) checkParityBlobs(n int) error {
+func (backend *BlobsFiles) checkParityBlobs(n int) error {
 	dataShards, err := backend.dataShards(n)
 	if err != nil {
 		return fmt.Errorf("failed to build data shards: %v", err)
@@ -545,7 +552,7 @@ func (backend *BlobsFileBackend) checkParityBlobs(n int) error {
 	return nil
 }
 
-func (backend *BlobsFileBackend) scan(iterFunc func(*BlobPos, byte, string, []byte) error) error {
+func (backend *BlobsFiles) scan(iterFunc func(*BlobPos, byte, string, []byte) error) error {
 	n := 0
 	for {
 		err := backend.scanBlobsFile(n, iterFunc)
@@ -565,7 +572,7 @@ func (backend *BlobsFileBackend) scan(iterFunc func(*BlobPos, byte, string, []by
 }
 
 // reindex scans all BlobsFile and reconstruct the index from scratch.
-func (backend *BlobsFileBackend) reindex() error {
+func (backend *BlobsFiles) reindex() error {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
 	backend.log.Info("re-indexing BlobsFiles...")
@@ -602,7 +609,7 @@ func (backend *BlobsFileBackend) reindex() error {
 }
 
 // Open all the blobs-XXXXX (read-only) and open the last for write
-func (backend *BlobsFileBackend) load() error {
+func (backend *BlobsFiles) load() error {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
 	backend.log.Debug("BlobsFileBackend: scanning BlobsFiles...")
@@ -649,7 +656,7 @@ func (backend *BlobsFileBackend) load() error {
 }
 
 // Open a file for writing, will close the previously open file if any.
-func (backend *BlobsFileBackend) wopen(n int) error {
+func (backend *BlobsFiles) wopen(n int) error {
 	backend.log.Info("opening blobsfile for writing", "name", backend.filename(n))
 	// Close the already opened file if any
 	if backend.current != nil {
@@ -693,7 +700,7 @@ func (backend *BlobsFileBackend) wopen(n int) error {
 }
 
 // Open a file for read
-func (backend *BlobsFileBackend) ropen(n int) error {
+func (backend *BlobsFiles) ropen(n int) error {
 	_, alreadyOpen := backend.files[n]
 	if alreadyOpen {
 		log.Printf("BlobsFileBackend: blobsfile %v already open", backend.filename(n))
@@ -721,13 +728,13 @@ func (backend *BlobsFileBackend) ropen(n int) error {
 	return nil
 }
 
-func (backend *BlobsFileBackend) filename(n int) string {
+func (backend *BlobsFiles) filename(n int) string {
 	return filepath.Join(backend.Directory, fmt.Sprintf("blobs-%05d", n))
 }
 
 // writeParityBlobs compute and write the 4 parity shards using Reed-Solomon 10,4 and write them at
 // end the blobsfile, and write the "data size" (blobsfile size before writing the parity shards).
-func (backend *BlobsFileBackend) writeParityBlobs() error {
+func (backend *BlobsFiles) writeParityBlobs() error {
 	start := time.Now()
 	// We write the data size at the end of the file
 	if _, err := backend.current.Seek(0, os.SEEK_END); err != nil {
@@ -771,7 +778,7 @@ func (backend *BlobsFileBackend) writeParityBlobs() error {
 }
 
 // Put save a new blob
-func (backend *BlobsFileBackend) Put(hash string, data []byte) (err error) {
+func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	// Acquire the lock
 	backend.Lock()
 	defer backend.Unlock()
@@ -846,12 +853,12 @@ func (backend *BlobsFileBackend) Put(hash string, data []byte) (err error) {
 }
 
 // Alias for exists
-func (backend *BlobsFileBackend) Stat(hash string) (bool, error) {
+func (backend *BlobsFiles) Stat(hash string) (bool, error) {
 	return backend.Exists(hash)
 }
 
 // Exists check if a blob is present
-func (backend *BlobsFileBackend) Exists(hash string) (bool, error) {
+func (backend *BlobsFiles) Exists(hash string) (bool, error) {
 	blobPos, err := backend.index.GetPos(hash)
 	if err != nil {
 		return false, err
@@ -862,13 +869,13 @@ func (backend *BlobsFileBackend) Exists(hash string) (bool, error) {
 	return false, nil
 }
 
-func (backend *BlobsFileBackend) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
+func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
 	flag = data[hashSize]
 	compressionAlgFlag := data[hashSize+1]
 	size = int(binary.LittleEndian.Uint32(data[hashSize+2 : blobOverhead]))
 	blob = make([]byte, size)
 	copy(blob, data[blobOverhead:])
-	if backend.snappyCompression && flag == Compressed && compressionAlgFlag == Snappy {
+	if backend.snappyCompression && flag == Compressed && compressionAlg(compressionAlgFlag) == Snappy {
 		blobDecoded, err := snappy.Decode(nil, blob)
 		if err != nil {
 			panic(fmt.Errorf("Failed to decode blob with Snappy: %v", err))
@@ -893,7 +900,7 @@ func makeHeaderEOF(padSize int64) (h []byte) {
 	return
 }
 
-func (backend *BlobsFileBackend) encodeBlob(blob []byte, flag byte) (size int, data []byte) { // XXX(tsileo): flag as argument
+func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []byte) { // XXX(tsileo): flag as argument
 	h := blake2b.New256()
 	h.Write(blob)
 
@@ -903,7 +910,7 @@ func (backend *BlobsFileBackend) encodeBlob(blob []byte, flag byte) (size int, d
 		dataEncoded := snappy.Encode(nil, blob)
 		flag = Compressed
 		blob = dataEncoded
-		compressionAlgFlag = Snappy
+		compressionAlgFlag = byte(Snappy)
 	}
 	size = len(blob)
 	data = make([]byte, len(blob)+blobOverhead)
@@ -917,12 +924,12 @@ func (backend *BlobsFileBackend) encodeBlob(blob []byte, flag byte) (size int, d
 }
 
 // BlobPos return the index entry for the given hash
-func (backend *BlobsFileBackend) BlobPos(hash string) (*BlobPos, error) {
+func (backend *BlobsFiles) BlobPos(hash string) (*BlobPos, error) {
 	return backend.index.GetPos(hash)
 }
 
 // Get returns the blob fur the given hash
-func (backend *BlobsFileBackend) Get(hash string) ([]byte, error) {
+func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 	// Fetch the index entry
 	blobPos, err := backend.index.GetPos(hash)
 	if err != nil {
@@ -965,7 +972,7 @@ func (backend *BlobsFileBackend) Get(hash string) ([]byte, error) {
 
 // Enumerate output all the blobs into the given chan (ordered lexicographically)
 // TODO(tsileo) take a callback func(hash string, size int) error
-func (backend *BlobsFileBackend) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end string, limit int) error {
+func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end string, limit int) error {
 	defer close(blobs)
 	backend.Lock()
 	defer backend.Unlock()

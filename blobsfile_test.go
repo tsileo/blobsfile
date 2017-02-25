@@ -9,7 +9,6 @@ import (
 	"os"
 	"reflect"
 	"sort"
-	"sync"
 	"testing"
 
 	_ "a4.io/blobstash/pkg/backend"
@@ -24,7 +23,7 @@ func check(e error) {
 }
 
 func BenchmarkBlobsFilePut512B(b *testing.B) {
-	back, err := New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -32,7 +31,7 @@ func BenchmarkBlobsFilePut512B(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512KB(b *testing.B) {
-	back, err := New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -40,7 +39,7 @@ func BenchmarkBlobsFilePut512KB(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut2MB(b *testing.B) {
-	back, err := New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -48,7 +47,7 @@ func BenchmarkBlobsFilePut2MB(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512BCompressed(b *testing.B) {
-	back, err := New("./tmp_blobsfile_test", 0, true, sync.WaitGroup{})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -56,7 +55,7 @@ func BenchmarkBlobsFilePut512BCompressed(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512KBCompressed(b *testing.B) {
-	back, err := New("./tmp_blobsfile_test", 0, true, sync.WaitGroup{})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -64,14 +63,14 @@ func BenchmarkBlobsFilePut512KBCompressed(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut2MBCompressed(b *testing.B) {
-	back, err := New("./tmp_blobsfile_test", 0, true, sync.WaitGroup{})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	benchmarkBlobsFilePut(back, 2000000, b)
 }
 
-func benchmarkBlobsFilePut(back *BlobsFileBackend, blobSize int, b *testing.B) {
+func benchmarkBlobsFilePut(back *BlobsFiles, blobSize int, b *testing.B) {
 	b.ResetTimer()
 	b.StopTimer()
 	for i := 0; i < b.N; i++ {
@@ -87,7 +86,7 @@ func benchmarkBlobsFilePut(back *BlobsFileBackend, blobSize int, b *testing.B) {
 }
 
 func TestBlobsFileReedSolomon(t *testing.T) {
-	b, err := New("./tmp_blobsfile_test", 16000000, false, sync.WaitGroup{})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	testParity(t, b, true, nil)
@@ -115,7 +114,7 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 		panic(err)
 	}
 	// Reopen the db
-	b, err = New("./tmp_blobsfile_test", 16000000, false, sync.WaitGroup{})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
 	check(err)
 	defer b.Close()
 	// Ensure we can recover from this corruption
@@ -127,14 +126,14 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 }
 
 func TestBlobsFileReedSolomonWithCompression(t *testing.T) {
-	b, err := New("./tmp_blobsfile_test", 16000000, true, sync.WaitGroup{})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
 	check(err)
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	testParity(t, b, true, nil)
 }
 
-func testParity(t *testing.T, b *BlobsFileBackend, insert bool, cb func(error) error) {
+func testParity(t *testing.T, b *BlobsFiles, insert bool, cb func(error) error) {
 	if insert {
 		for i := 0; i < 31+10; i++ {
 			h, blob := randBlob(512000)
@@ -162,26 +161,26 @@ func randBlob(size int) (string, []byte) {
 }
 
 func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
-	b, err := New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	hashes, blobs := testBackendPutGetEnumerate(t, b, 50)
 	b.Close()
 	// Test we can still read everything when closing/reopening the blobsfile
-	b, err = New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	testBackendEnumerate(t, b, hashes)
 	testBackendGet(t, b, hashes, blobs)
 	b.Close()
 	b.RemoveIndex()
 	// Try with the index and removed and test re-indexing
-	b, err = New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	testBackendEnumerate(t, b, hashes)
 	testBackendGet(t, b, hashes, blobs)
 }
 
-func backendPut(t *testing.T, b *BlobsFileBackend, blobsCount int) ([]string, [][]byte) {
+func backendPut(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
 	blobs := [][]byte{}
 	hashes := []string{}
 	// TODO(tsileo): 50 blobs if in short mode
@@ -196,14 +195,14 @@ func backendPut(t *testing.T, b *BlobsFileBackend, blobsCount int) ([]string, []
 	return hashes, blobs
 }
 
-func testBackendPutGetEnumerate(t *testing.T, b *BlobsFileBackend, blobsCount int) ([]string, [][]byte) {
+func testBackendPutGetEnumerate(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
 	hashes, blobs := backendPut(t, b, blobsCount)
 	testBackendGet(t, b, hashes, blobs)
 	testBackendEnumerate(t, b, hashes)
 	return hashes, blobs
 }
 
-func testBackendGet(t *testing.T, b *BlobsFileBackend, hashes []string, blobs [][]byte) {
+func testBackendGet(t *testing.T, b *BlobsFiles, hashes []string, blobs [][]byte) {
 	blobsIndex := map[string]bool{}
 	for _, blob := range blobs {
 		blobsIndex[hashutil.Compute(blob)] = true
@@ -223,7 +222,7 @@ func testBackendGet(t *testing.T, b *BlobsFileBackend, hashes []string, blobs []
 	}
 }
 
-func testBackendEnumerate(t *testing.T, b *BlobsFileBackend, hashes []string) []string {
+func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string) []string {
 	sort.Strings(hashes)
 	bchan := make(chan *pblob.SizedBlobRef)
 	errc := make(chan error, 1)
@@ -246,8 +245,8 @@ func testBackendEnumerate(t *testing.T, b *BlobsFileBackend, hashes []string) []
 	return enumHashes
 }
 
-func TestBlobsFileBlobEncoding(t *testing.T) {
-	b, err := New("./tmp_blobsfile_test", 0, false, sync.WaitGroup{})
+func TestBlobsFileBlobEncodingNoCompression(t *testing.T) {
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
 	check(err)
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -258,6 +257,22 @@ func TestBlobsFileBlobEncoding(t *testing.T) {
 		t.Errorf("bad flag, got %v, expected %v", f, Blob)
 	}
 	if size != 512 || !bytes.Equal(blob, blob2) {
+		t.Errorf("Error blob encoding, got size:%v, expected:512, got blob:%v, expected:%v", size, blob2[:10], blob[:10])
+	}
+}
+func TestBlobsFileBlobEncoding(t *testing.T) {
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	check(err)
+	defer b.Close()
+	defer os.RemoveAll("./tmp_blobsfile_test")
+	_, blob := randBlob(512)
+	_, data := b.encodeBlob(blob, Blob)
+	size, blob2, f := b.decodeBlob(data)
+	if f != Blob {
+		t.Errorf("bad flag, got %v, expected %v", f, Blob)
+	}
+	// Don't check the size are as the returned size is the size of the compressed blob
+	if !bytes.Equal(blob, blob2) {
 		t.Errorf("Error blob encoding, got size:%v, expected:512, got blob:%v, expected:%v", size, blob2[:10], blob[:10])
 	}
 }
