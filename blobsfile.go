@@ -19,6 +19,8 @@ Blobs are indexed by a BlobPos entry (value stored as string):
 */
 package blobsfile
 
+// FIXME(tsileo): switch to canonical imports a4.io/blobsfile
+
 import (
 	"bytes"
 	"encoding/binary"
@@ -50,8 +52,8 @@ const (
 	headerMagic = "\x00Blobs"
 	headerSize  = len(headerMagic) + 58 // magic + 58 reserved bytes
 
-	// 37 bytes of meta-data are stored for each blob: 32 byte hash + 1 byte flag + 4 byte blob len
-	blobOverhead = 37
+	// 38 bytes of meta-data are stored for each blob: 32 byte hash + 2 byte flag + 4 byte blob len
+	blobOverhead = 38
 	hashSize     = 32
 
 	// Reed-Solomon config
@@ -67,6 +69,11 @@ const (
 	Compressed
 	ParityBlob
 	EOF
+)
+
+const (
+	// Supported compression algorithms
+	Snappy byte = 1 << iota
 )
 
 var (
@@ -120,6 +127,9 @@ func firstCorruptedShard(offset int64, shardSize int) int {
 		i++
 	}
 	return 0
+}
+
+type Opts struct {
 }
 
 // Holds all the backend data
@@ -265,7 +275,7 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 
 	blobHash := make([]byte, hashSize)
 	blobSizeEncoded := make([]byte, 4)
-	flags := make([]byte, 1)
+	flags := make([]byte, 2)
 
 	for {
 		// fmt.Printf("blobsIndexed=%d\noffset=%d\n", blobsIndexed, offset)
@@ -331,9 +341,9 @@ func (backend *BlobsFileBackend) scanBlobsFile(n int, iterFunc func(*BlobPos, by
 
 func copyShards(i [][]byte) (o [][]byte) {
 	for _, a := range i {
-		n := make([]byte, len(a))
-		copy(n[:], a)
-		o = append(o, n)
+		// n := make([]byte, len(a))
+		// copy(n[:], a)
+		o = append(o, a)
 	}
 	return o
 }
@@ -483,10 +493,12 @@ func (backend *BlobsFileBackend) parityShards(n int) ([][]byte, error) {
 	}
 	blobsfile := backend.files[n]
 	parityBlobs := [][]byte{}
+
+	blobHash := make([]byte, hashSize)
+	blobSizeEncoded := make([]byte, 4)
+	flags := make([]byte, 2)
+
 	for i := 0; i < parityShards; i++ {
-		blobHash := make([]byte, hashSize)
-		blobSizeEncoded := make([]byte, 4)
-		flags := make([]byte, 1)
 		if _, err := blobsfile.Read(blobHash); err == io.EOF {
 			return parityBlobs, fmt.Errorf("missing parity blob, only found %d", len(parityBlobs))
 		}
@@ -852,10 +864,11 @@ func (backend *BlobsFileBackend) Exists(hash string) (bool, error) {
 
 func (backend *BlobsFileBackend) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
 	flag = data[hashSize]
-	size = int(binary.LittleEndian.Uint32(data[hashSize+1 : blobOverhead]))
+	compressionAlgFlag := data[hashSize+1]
+	size = int(binary.LittleEndian.Uint32(data[hashSize+2 : blobOverhead]))
 	blob = make([]byte, size)
 	copy(blob, data[blobOverhead:])
-	if backend.snappyCompression && flag == Compressed {
+	if backend.snappyCompression && flag == Compressed && compressionAlgFlag == Snappy {
 		blobDecoded, err := snappy.Decode(nil, blob)
 		if err != nil {
 			panic(fmt.Errorf("Failed to decode blob with Snappy: %v", err))
@@ -884,18 +897,21 @@ func (backend *BlobsFileBackend) encodeBlob(blob []byte, flag byte) (size int, d
 	h := blake2b.New256()
 	h.Write(blob)
 
+	var compressionAlgFlag byte
 	// Only compress regular blobs
 	if backend.snappyCompression && flag == Blob {
 		dataEncoded := snappy.Encode(nil, blob)
 		flag = Compressed
 		blob = dataEncoded
+		compressionAlgFlag = Snappy
 	}
 	size = len(blob)
 	data = make([]byte, len(blob)+blobOverhead)
 	copy(data[:], h.Sum(nil))
 	// set the flag
 	data[hashSize] = flag
-	binary.LittleEndian.PutUint32(data[hashSize+1:], uint32(size))
+	data[hashSize+1] = compressionAlgFlag
+	binary.LittleEndian.PutUint32(data[hashSize+2:], uint32(size))
 	copy(data[blobOverhead:], blob)
 	return
 }
