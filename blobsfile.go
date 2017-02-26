@@ -63,19 +63,17 @@ const (
 	defaultMaxBlobsFileSize = 256 << 20 // 256MB
 )
 
+// Blob flags
 const (
-	// Blob flags
-	Blob byte = 1 << iota
-	Compressed
-	ParityBlob
-	EOF
+	flagBlob byte = 1 << iota
+	flagCompressed
+	flagParityBlob
+	flagEOF
 )
 
-type compressionAlg byte
-
+// Compression algorithms flag
 const (
-	// Supported compression algorithms
-	Snappy compressionAlg = 1
+	flagSnappy byte = 1 << iota
 )
 
 var (
@@ -87,29 +85,30 @@ var (
 )
 
 var (
-	ErrBlobNotFound        = errors.New("blob not found")
-	ErrParityBlobCorrupted = errors.New("a parity blob is corrupted")
-	ErrBlobsfileCorrupted  = errors.New("blobsfile is corrupted")
+	// ErrBlobNotFound reports that the blob could not be found
+	ErrBlobNotFound = errors.New("blob not found")
+
+	// ErrBlobsfileCorrupted reports that one of the BlobsFile is corrupted and could not be repaired
+	ErrBlobsfileCorrupted = errors.New("blobsfile is corrupted")
+
+	errParityBlobCorrupted = errors.New("a parity blob is corrupted")
 )
 
-type CorruptedError struct {
-	blobs  []*BlobPos
+// corruptedError give more about the corruption of a BlobsFile
+type corruptedError struct {
+	blobs  []*blobPos
 	offset int64
 	err    error
 }
 
-func (ce *CorruptedError) Blobs() []*BlobPos {
-	return ce.blobs
-}
-
-func (ce *CorruptedError) Error() string {
+func (ce *corruptedError) Error() string {
 	if len(ce.blobs) > 0 {
 		return fmt.Sprintf("%d blobs are corrupt", len(ce.blobs))
 	}
 	return fmt.Sprintf("corrupted at offset %d: %v", ce.offset, ce.err)
 }
 
-func (ce *CorruptedError) FirstBadOffset() int64 {
+func (ce *corruptedError) firstBadOffset() int64 {
 	if len(ce.blobs) > 0 {
 		off := int64(ce.blobs[0].offset)
 		if ce.offset == -1 || off < ce.offset {
@@ -122,7 +121,7 @@ func (ce *CorruptedError) FirstBadOffset() int64 {
 func firstCorruptedShard(offset int64, shardSize int) int {
 	i := 0
 	ioffset := int(offset)
-	for {
+	for j := 0; j < 10; j++ {
 		if shardSize+(shardSize*i) > ioffset {
 			return i
 		}
@@ -131,9 +130,15 @@ func firstCorruptedShard(offset int64, shardSize int) int {
 	return 0
 }
 
+// Opts represents the DB options
 type Opts struct {
-	BlobsFileSize      int64
-	Directory          string
+	// The max size of a BlobsFile, will be 256MB by default if not set
+	BlobsFileSize int64
+
+	// Where the data and indexes will be stored
+	Directory string
+
+	// Compression is enabled by default
 	DisableCompression bool
 }
 
@@ -143,7 +148,7 @@ func (o *Opts) init() {
 	}
 }
 
-// Holds all the backend data
+// BlobsFiles represent the DB
 type BlobsFiles struct {
 	log log2.Logger
 	// Directory which holds the blobsfile
@@ -159,7 +164,7 @@ type BlobsFiles struct {
 	snappyCompression bool
 
 	// The kv index that maintains blob positions
-	index *BlobsIndex
+	index *blobsIndex
 
 	// Current blobs file opened for write
 	n       int
@@ -186,7 +191,7 @@ func New(opts *Opts) (*BlobsFiles, error) {
 		// No index found
 		reindex = true
 	}
-	index, err := NewIndex(dir)
+	index, err := newIndex(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -217,41 +222,42 @@ func New(opts *Opts) (*BlobsFiles, error) {
 	return backend, nil
 }
 
-func (backend *BlobsFiles) IterOpenFiles() (files []*os.File) {
+func (backend *BlobsFiles) iterOpenFiles() (files []*os.File) {
 	for _, f := range backend.files {
 		files = append(files, f)
 	}
 	return files
 }
 
-func (backend *BlobsFiles) CloseOpenFiles() {
+func (backend *BlobsFiles) closeOpenFiles() {
 	for _, f := range backend.files {
 		f.Close()
 	}
 }
 
+// Close closes all the indexes and data files.
 func (backend *BlobsFiles) Close() {
 	backend.wg.Wait()
 	backend.log.Debug("closing index...")
 	backend.index.Close()
 }
 
-// Remove the index
+// RemoveIndex removes the index files (which will be rebuilt next time the DB is open).
 func (backend *BlobsFiles) RemoveIndex() {
-	backend.index.Remove()
+	backend.index.remove()
 }
 
-// GetN returns the total numbers of BlobsFile
+// GetN returns the total numbers of BlobsFile.
 func (backend *BlobsFiles) GetN() (int, error) {
-	return backend.index.GetN()
+	return backend.index.getN()
 }
 
 func (backend *BlobsFiles) saveN() error {
-	return backend.index.SetN(backend.n)
+	return backend.index.setN(backend.n)
 }
 
 func (backend *BlobsFiles) restoreN() error {
-	n, err := backend.index.GetN()
+	n, err := backend.index.getN()
 	if err != nil {
 		return err
 	}
@@ -259,13 +265,13 @@ func (backend *BlobsFiles) restoreN() error {
 	return nil
 }
 
-// Implements the Stringer interface
+// String implements the Stringer interface.
 func (backend *BlobsFiles) String() string {
 	return fmt.Sprintf("blobsfile-%v", backend.Directory)
 }
 
-func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*BlobPos, byte, string, []byte) error) error {
-	corrupted := []*BlobPos{}
+func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, string, []byte) error) error {
+	corrupted := []*blobPos{}
 
 	err := backend.ropen(n)
 	if err != nil {
@@ -291,32 +297,32 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*BlobPos, byte, st
 			if err == io.EOF {
 				break
 			}
-			return &CorruptedError{nil, offset, fmt.Errorf("failed to read hash: %v", err)}
+			return &corruptedError{nil, offset, fmt.Errorf("failed to read hash: %v", err)}
 		}
 		if _, err := blobsfile.Read(flags); err != nil {
-			return &CorruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
+			return &corruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
 		// If we reached the EOF blob, break
-		if flags[0] == EOF {
+		if flags[0] == flagEOF {
 			break
 		}
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
-			return &CorruptedError{nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
+			return &corruptedError{nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
 		}
 		blobSize := int64(binary.LittleEndian.Uint32(blobSizeEncoded))
 		rawBlob := make([]byte, int(blobSize))
 		read, err := blobsfile.Read(rawBlob)
 		if err != nil || read != int(blobSize) {
-			return &CorruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
+			return &corruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
 		}
 		// XXX(tsileo): optional flag to `BlobPos`?
-		blobPos := &BlobPos{n: n, offset: int(offset), size: int(blobSize)}
+		blobPos := &blobPos{n: n, offset: int(offset), size: int(blobSize)}
 		offset += blobOverhead + blobSize
 		var blob []byte
 		if backend.snappyCompression {
 			blobDecoded, err := snappy.Decode(nil, rawBlob)
 			if err != nil {
-				return &CorruptedError{nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
+				return &corruptedError{nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
 			}
 			blob = blobDecoded
 		} else {
@@ -340,7 +346,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*BlobPos, byte, st
 	}
 
 	if len(corrupted) > 0 {
-		return &CorruptedError{corrupted, -1, nil}
+		return &corruptedError{corrupted, -1, nil}
 	}
 
 	return nil
@@ -389,8 +395,8 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 	}
 	dataShardIndex := 0
 	if err != nil {
-		if cerr, ok := err.(*CorruptedError); ok {
-			badOffset := cerr.FirstBadOffset()
+		if cerr, ok := err.(*corruptedError); ok {
+			badOffset := cerr.firstBadOffset()
 			fmt.Printf("badOffset: %v\n", badOffset)
 			dataShardIndex = firstCorruptedShard(badOffset, int(backend.maxBlobsFileSize)/dataShards)
 			fmt.Printf("dataShardIndex=%d\n", dataShardIndex)
@@ -523,7 +529,7 @@ func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 		}
 		hash := fmt.Sprintf("%x", blake2b.Sum256(blob))
 		if fmt.Sprintf("%x", blobHash) != hash {
-			return parityBlobs, ErrParityBlobCorrupted
+			return parityBlobs, errParityBlobCorrupted
 		}
 		parityBlobs = append(parityBlobs, blob)
 	}
@@ -552,7 +558,7 @@ func (backend *BlobsFiles) checkParityBlobs(n int) error {
 	return nil
 }
 
-func (backend *BlobsFiles) scan(iterFunc func(*BlobPos, byte, string, []byte) error) error {
+func (backend *BlobsFiles) scan(iterFunc func(*blobPos, byte, string, []byte) error) error {
 	n := 0
 	for {
 		err := backend.scanBlobsFile(n, iterFunc)
@@ -579,12 +585,12 @@ func (backend *BlobsFiles) reindex() error {
 	n := 0
 	blobsIndexed := 0
 
-	iterFunc := func(blobPos *BlobPos, flag byte, hash string, _ []byte) error {
+	iterFunc := func(blobPos *blobPos, flag byte, hash string, _ []byte) error {
 		// Skip parity blobs
-		if flag == ParityBlob {
+		if flag == flagParityBlob {
 			return nil
 		}
-		if err := backend.index.SetPos(hash, blobPos); err != nil {
+		if err := backend.index.setPos(hash, blobPos); err != nil {
 			return err
 		}
 		n = blobPos.n
@@ -759,7 +765,7 @@ func (backend *BlobsFiles) writeParityBlobs() error {
 	// Save the parity blobs
 	parityBlobs := shards[dataShards:len(shards)]
 	for _, parityBlob := range parityBlobs {
-		_, parityBlobEncoded := backend.encodeBlob(parityBlob, ParityBlob)
+		_, parityBlobEncoded := backend.encodeBlob(parityBlob, flagParityBlob)
 
 		n, err := backend.current.Write(parityBlobEncoded)
 		backend.size += int64(len(parityBlobEncoded))
@@ -787,7 +793,7 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	defer backend.wg.Done()
 
 	// Encode the blob
-	blobSize, blobEncoded := backend.encodeBlob(data, Blob)
+	blobSize, blobEncoded := backend.encodeBlob(data, flagBlob)
 
 	// Ensure the blosfile size won't exceed the maxBlobsFileSize
 	if backend.size+int64(blobSize+blobOverhead) > backend.maxBlobsFileSize {
@@ -829,8 +835,8 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	}
 
 	// Save the blob in the index
-	blobPos := &BlobPos{n: backend.n, offset: int(backend.size), size: blobSize}
-	if err := backend.index.SetPos(hash, blobPos); err != nil {
+	blobPos := &blobPos{n: backend.n, offset: int(backend.size), size: blobSize}
+	if err := backend.index.setPos(hash, blobPos); err != nil {
 		return err
 	}
 
@@ -852,14 +858,14 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	return
 }
 
-// Alias for exists
+// Stat is an alias for `Exists`.
 func (backend *BlobsFiles) Stat(hash string) (bool, error) {
 	return backend.Exists(hash)
 }
 
-// Exists check if a blob is present
+// Exists return true if the blobs is already stored.
 func (backend *BlobsFiles) Exists(hash string) (bool, error) {
-	blobPos, err := backend.index.GetPos(hash)
+	blobPos, err := backend.index.getPos(hash)
 	if err != nil {
 		return false, err
 	}
@@ -875,12 +881,12 @@ func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag 
 	size = int(binary.LittleEndian.Uint32(data[hashSize+2 : blobOverhead]))
 	blob = make([]byte, size)
 	copy(blob, data[blobOverhead:])
-	if backend.snappyCompression && flag == Compressed && compressionAlg(compressionAlgFlag) == Snappy {
+	if backend.snappyCompression && flag == flagCompressed && compressionAlgFlag == flagSnappy {
 		blobDecoded, err := snappy.Decode(nil, blob)
 		if err != nil {
 			panic(fmt.Errorf("Failed to decode blob with Snappy: %v", err))
 		}
-		flag = Blob
+		flag = flagBlob
 		blob = blobDecoded
 	}
 	h := blake2b.New256()
@@ -892,11 +898,11 @@ func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag 
 }
 
 func makeHeaderEOF(padSize int64) (h []byte) {
-	// FIXME(tsileo): take the len of the padding as arg and write it as uint32 after the flag
 	// Write a hash with only zeroes
 	h = make([]byte, blobOverhead)
-	h[32] = EOF
-	binary.LittleEndian.PutUint32(h[33:], uint32(padSize))
+	// EOF flag, empty second flag
+	h[32] = flagEOF
+	binary.LittleEndian.PutUint32(h[34:], uint32(padSize))
 	return
 }
 
@@ -906,11 +912,11 @@ func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []
 
 	var compressionAlgFlag byte
 	// Only compress regular blobs
-	if backend.snappyCompression && flag == Blob {
+	if backend.snappyCompression && flag == flagBlob {
 		dataEncoded := snappy.Encode(nil, blob)
-		flag = Compressed
+		flag = flagCompressed
 		blob = dataEncoded
-		compressionAlgFlag = byte(Snappy)
+		compressionAlgFlag = flagSnappy
 	}
 	size = len(blob)
 	data = make([]byte, len(blob)+blobOverhead)
@@ -924,14 +930,14 @@ func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []
 }
 
 // BlobPos return the index entry for the given hash
-func (backend *BlobsFiles) BlobPos(hash string) (*BlobPos, error) {
-	return backend.index.GetPos(hash)
+func (backend *BlobsFiles) blobPos(hash string) (*blobPos, error) {
+	return backend.index.getPos(hash)
 }
 
 // Get returns the blob fur the given hash
 func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 	// Fetch the index entry
-	blobPos, err := backend.index.GetPos(hash)
+	blobPos, err := backend.index.getPos(hash)
 	if err != nil {
 		return nil, fmt.Errorf("Error fetching GetPos: %v", err)
 	}
@@ -940,9 +946,8 @@ func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 	if blobPos == nil {
 		if err == nil {
 			return nil, ErrBlobNotFound
-		} else {
-			return nil, err
 		}
+		return nil, err
 	}
 
 	// Read the encoded blob from the BlobsFile
@@ -982,7 +987,7 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end
 	if err != nil {
 		return err
 	}
-	enum, _, err := backend.index.db.Seek(formatKey(BlobPosKey, s))
+	enum, _, err := backend.index.db.Seek(formatKey(blobPosKey, s))
 	// endBytes := formatKey(BlobPosKey, []byte(end))
 	endBytes := []byte(end)
 	// formatKey(BlobPosKey, []byte(end))
@@ -1000,7 +1005,7 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end
 		if bytes.Compare([]byte(hash), endBytes) > 0 || (limit != 0 && i > limit) {
 			return nil
 		}
-		blobPos, err := backend.BlobPos(hash)
+		blobPos, err := backend.blobPos(hash)
 		if err != nil {
 			return nil
 		}

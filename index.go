@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,11 +15,11 @@ import (
 
 // MetaKey and BlobPosKey are used to namespace the DB keys.
 const (
-	MetaKey byte = iota
-	BlobPosKey
+	metaKey byte = iota
+	blobPosKey
 )
 
-// Add the prefix byte to the given key
+// formatKey prepends the prefix byte to the given key.
 func formatKey(prefix byte, bkey []byte) []byte {
 	res := make([]byte, len(bkey)+1)
 	res[0] = prefix
@@ -37,15 +36,15 @@ func opts() *kv.Options {
 	}
 }
 
-// BlobsIndex holds the position of blobs in BlobsFile
-type BlobsIndex struct {
+// blobsIndex holds the position of blobs in BlobsFile.
+type blobsIndex struct {
 	db   *kv.DB
 	path string
 	sync.Mutex
 }
 
-// BlobPos is a blob entry in the index
-type BlobPos struct {
+// blobPos is a blob entry in the index.
+type blobPos struct {
 	// bobs-n files
 	n int
 	// blobs offset/size in the blobs file
@@ -53,13 +52,14 @@ type BlobPos struct {
 	size   int
 }
 
-func (blob *BlobPos) Size() int {
+// Size returns the blob size.
+func (blob *blobPos) Size() int {
 	return blob.size
 }
 
-// Value serialize a BlobsPos as string
+// Value serialize a BlobsPos as string.
 // (value is encoded as uvarint: n + offset + size)
-func (blob BlobPos) Value() []byte {
+func (blob *blobPos) Value() []byte {
 	bufTmp := make([]byte, 10)
 	var buf bytes.Buffer
 	w := binary.PutUvarint(bufTmp[:], uint64(blob.n))
@@ -71,7 +71,8 @@ func (blob BlobPos) Value() []byte {
 	return buf.Bytes()
 }
 
-func decodeBlobPos(data []byte) (blob BlobPos, error error) {
+func decodeBlobPos(data []byte) (blob *blobPos, error error) {
+	blob = &blobPos{}
 	r := bytes.NewBuffer(data)
 	// read blob.n
 	ures, err := binary.ReadUvarint(r)
@@ -96,73 +97,67 @@ func decodeBlobPos(data []byte) (blob BlobPos, error error) {
 	return blob, nil
 }
 
-// NewIndex initializes a new index.
-func NewIndex(path string) (*BlobsIndex, error) {
-	db_path := filepath.Join(path, "blobs-index")
+// newIndex initializes a new index.
+func newIndex(path string) (*blobsIndex, error) {
+	dbPath := filepath.Join(path, "blobs-index")
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return nil, err
 	}
 	createOpen := kv.Open
-	if _, err := os.Stat(db_path); os.IsNotExist(err) {
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		createOpen = kv.Create
 	}
-	db, err := createOpen(db_path, &kv.Options{})
-	return &BlobsIndex{db: db, path: db_path}, err
+	db, err := createOpen(dbPath, &kv.Options{})
+	return &blobsIndex{db: db, path: dbPath}, err
 }
 
-func (index *BlobsIndex) FormatBlobPosKey(key string) []byte {
-	return formatKey(BlobPosKey, []byte(key))
+func (index *blobsIndex) formatBlobPosKey(key string) []byte {
+	return formatKey(blobPosKey, []byte(key))
 }
 
-func (index *BlobsIndex) DB() *kv.DB {
-	return index.db
-}
-
-// Close all the open file descriptor
-func (index *BlobsIndex) Close() {
+// Close closes all the open file descriptors.
+func (index *blobsIndex) Close() {
 	index.Lock()
 	defer index.Unlock()
 	index.db.Close()
 }
 
-// Remove remove the kv file
-func (index *BlobsIndex) Remove() {
-	log.Printf("removing path: %v", index.path)
+// remove removes the kv file.
+func (index *blobsIndex) remove() {
 	os.RemoveAll(index.path)
 }
 
-// SetPos creates a new BlobPos entry in the index for the given hash.
-func (index *BlobsIndex) SetPos(hexHash string, pos *BlobPos) error {
+// setPos creates a new blobPos entry in the index for the given hash.
+func (index *blobsIndex) setPos(hexHash string, pos *blobPos) error {
 	index.Lock()
 	defer index.Unlock()
 	hash, err := hex.DecodeString(hexHash)
 	if err != nil {
 		return err
 	}
-	return index.db.Set(formatKey(BlobPosKey, hash), pos.Value())
+	return index.db.Set(formatKey(blobPosKey, hash), pos.Value())
 }
 
-// DeletePos deletes the stored BlobPos for the given hash.
-func (index *BlobsIndex) DeletePos(hexHash string) error {
+// deletePos deletes the stored blobPos for the given hash.
+func (index *blobsIndex) deletePos(hexHash string) error {
 	index.Lock()
 	defer index.Unlock()
 	hash, err := hex.DecodeString(hexHash)
 	if err != nil {
 		return err
 	}
-	return index.db.Delete(formatKey(BlobPosKey, hash))
+	return index.db.Delete(formatKey(blobPosKey, hash))
 }
 
-// GetPos retrieve the stored BlobPos for the given hash.
-// FIXME(tsileo): make all these methods private
-func (index *BlobsIndex) GetPos(hexHash string) (*BlobPos, error) {
+// getPos retrieve the stored blobPos for the given hash.
+func (index *blobsIndex) getPos(hexHash string) (*blobPos, error) {
 	index.Lock()
 	defer index.Unlock()
 	hash, err := hex.DecodeString(hexHash)
 	if err != nil {
 		return nil, err
 	}
-	data, err := index.db.Get(nil, formatKey(BlobPosKey, hash))
+	data, err := index.db.Get(nil, formatKey(blobPosKey, hash))
 	if err != nil {
 		return nil, fmt.Errorf("error getting BlobPos: %v", err)
 	}
@@ -170,21 +165,21 @@ func (index *BlobsIndex) GetPos(hexHash string) (*BlobPos, error) {
 		return nil, nil
 	}
 	bpos, err := decodeBlobPos(data)
-	return &bpos, err
+	return bpos, err
 }
 
-// SetN stores the latest N (blobs-N) to remember the latest BlobsFile opened.
-func (index *BlobsIndex) SetN(n int) error {
+// setN stores the latest N (blobs-N) to remember the latest BlobsFile opened.
+func (index *blobsIndex) setN(n int) error {
 	index.Lock()
 	defer index.Unlock()
-	return index.db.Set(formatKey(MetaKey, []byte("n")), []byte(strconv.Itoa(n)))
+	return index.db.Set(formatKey(metaKey, []byte("n")), []byte(strconv.Itoa(n)))
 }
 
-// GetN retrieves the latest N (blobs-N) stored.
-func (index *BlobsIndex) GetN() (int, error) {
+// getN retrieves the latest N (blobs-N) stored.
+func (index *blobsIndex) getN() (int, error) {
 	index.Lock()
 	defer index.Unlock()
-	data, err := index.db.Get(nil, formatKey(MetaKey, []byte("n")))
+	data, err := index.db.Get(nil, formatKey(metaKey, []byte("n")))
 	if err != nil || string(data) == "" {
 		return 0, nil
 	}

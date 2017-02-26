@@ -251,10 +251,10 @@ func TestBlobsFileBlobEncodingNoCompression(t *testing.T) {
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	_, blob := randBlob(512)
-	_, data := b.encodeBlob(blob, Blob)
+	_, data := b.encodeBlob(blob, flagBlob)
 	size, blob2, f := b.decodeBlob(data)
-	if f != Blob {
-		t.Errorf("bad flag, got %v, expected %v", f, Blob)
+	if f != flagBlob {
+		t.Errorf("bad flag, got %v, expected %v", f, flagBlob)
 	}
 	if size != 512 || !bytes.Equal(blob, blob2) {
 		t.Errorf("Error blob encoding, got size:%v, expected:512, got blob:%v, expected:%v", size, blob2[:10], blob[:10])
@@ -266,10 +266,10 @@ func TestBlobsFileBlobEncoding(t *testing.T) {
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	_, blob := randBlob(512)
-	_, data := b.encodeBlob(blob, Blob)
+	_, data := b.encodeBlob(blob, flagBlob)
 	size, blob2, f := b.decodeBlob(data)
-	if f != Blob {
-		t.Errorf("bad flag, got %v, expected %v", f, Blob)
+	if f != flagBlob {
+		t.Errorf("bad flag, got %v, expected %v", f, flagBlob)
 	}
 	// Don't check the size are as the returned size is the size of the compressed blob
 	if !bytes.Equal(blob, blob2) {
