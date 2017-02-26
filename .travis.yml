@@ -3,6 +3,7 @@ language: go
 go:
   - 1.7
   - 1.8
+install: false
+go_import_path: a4.io/blobsfile
 script:
- - go get -v a4.io/blobsfile
- - go test -v -bench=. $(go list ./... | grep pkg)
+ - go test -v -bench=. .
