@@ -261,6 +261,7 @@ func TestBlobsFileBlobEncodingNoCompression(t *testing.T) {
 		t.Errorf("Error blob encoding, got size:%v, expected:512, got blob:%v, expected:%v", size, blob2[:10], blob[:10])
 	}
 }
+
 func TestBlobsFileBlobEncoding(t *testing.T) {
 	b, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)

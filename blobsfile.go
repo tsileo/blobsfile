@@ -192,8 +192,9 @@ type BlobsFiles struct {
 	lastError      error
 	lastErrorMutex sync.Mutex // mutex for guarding the lastErr
 
-	rse reedsolomon.Encoder
-	wg  sync.WaitGroup
+	rse    reedsolomon.Encoder
+	wg     sync.WaitGroup
+	putErr chan error
 	sync.Mutex
 }
 
@@ -228,6 +229,7 @@ func New(opts *Opts) (*BlobsFiles, error) {
 		maxBlobsFileSize:  opts.BlobsFileSize,
 		rse:               enc,
 		reindexMode:       reindex,
+		putErr:            make(chan error, 2),
 	}
 	backend.log = logger.Log.New("backend", backend.String())
 	backend.log.Debug("Started")
@@ -883,22 +885,38 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 		}
 	}
 
-	// Save the blob in the index
-	blobPos := &blobPos{n: backend.n, offset: int(backend.size), size: blobSize}
-	if err := backend.index.setPos(hash, blobPos); err != nil {
-		return err
-	}
+	go func() {
+		// Save the blob in the index
+		blobPos := &blobPos{n: backend.n, offset: int(backend.size), size: blobSize}
+		if err := backend.index.setPos(hash, blobPos); err != nil {
+			backend.putErr <- err
+			return
+		}
 
-	// Actually save the blob
-	n, err := backend.current.Write(blobEncoded)
-	backend.size += int64(len(blobEncoded))
-	if err != nil || n != len(blobEncoded) {
-		return fmt.Errorf("Error writing blob (%v,%v)", err, n)
-	}
+		backend.putErr <- nil
+	}()
 
-	// Fsync
-	if err = backend.current.Sync(); err != nil {
-		panic(err)
+	go func() {
+		// Save the blob in the BlobsFile
+		n, err := backend.current.Write(blobEncoded)
+		backend.size += int64(len(blobEncoded))
+		if err != nil || n != len(blobEncoded) {
+			backend.putErr <- fmt.Errorf("Error writing blob (%v,%v)", err, n)
+		}
+
+		// Fsync
+		if err = backend.current.Sync(); err != nil {
+			backend.putErr <- err
+			return
+		}
+
+		backend.putErr <- nil
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-backend.putErr; err != nil {
+			return err
+		}
 	}
 
 	// Update the expvars
