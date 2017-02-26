@@ -159,6 +159,26 @@ func randBlob(size int) (string, []byte) {
 	return hashutil.Compute(blob), blob
 }
 
+func TestBlobsFilePutIdempotent(t *testing.T) {
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	check(err)
+	defer back.Close()
+	defer os.RemoveAll("./tmp_blobsfile_test")
+	h, blob := randBlob(512)
+	for i := 0; i < 10; i++ {
+		if err := back.Put(h, blob); err != nil {
+			panic(err)
+		}
+	}
+	stats, err := back.Stats()
+	if err != nil {
+		panic(err)
+	}
+	if stats.BlobsCount != 1 || stats.BlobsSize != 512 {
+		t.Errorf("bad stats: %+v", stats)
+	}
+}
+
 func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
 	b, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
