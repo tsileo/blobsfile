@@ -8,14 +8,6 @@ Blobs are indexed by a kv file.
 
 New blobs are appended to the current file, and when the file exceed the limit, a new fie is created.
 
-Blobs are stored with its hash and its size (for a total overhead of 32 bytes) followed by the blob itself, thus allowing re-indexing.
-
-	Blob hash (32 bytes) + Flag (1 byte) + Blob size (4 byte, uint32 binary encoded) + Blob data
-
-Blobs are indexed by a BlobPos entry (value stored as string):
-
-	Blob Hash => n (BlobFile index) + (space) + offset + (space) + Blob size
-
 */
 package blobsfile // import "a4.io/blobsfile"
 
@@ -38,7 +30,8 @@ import (
 	"github.com/klauspost/reedsolomon"
 )
 
-// TODO(tsileo): for blobs file not yet filled, propose a manual way to correct errors (like repl or s3 in blobstash?)
+// TODO(tsileo): for blobs file not yet filled, propose a manual way to correct errors
+// (like repl or s3 in blobstash?)
 // TODO(tsileo): embed the version in the header
 
 const (
