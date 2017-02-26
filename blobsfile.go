@@ -309,15 +309,16 @@ func (backend *BlobsFiles) lastError() error {
 }
 
 // Close closes all the indexes and data files.
-func (backend *BlobsFiles) Close() (err error) {
+func (backend *BlobsFiles) Close() error {
+	var err error
 	backend.wg.Wait()
-	if err := backend.lastError(); err != nil {
-		err = err
+	if cerr := backend.lastError(); cerr != nil {
+		err = cerr
 	}
-	if err := backend.index.Close(); err != nil {
-		err = err
+	if cerr := backend.index.Close(); cerr != nil {
+		err = cerr
 	}
-	return
+	return err
 }
 
 // RemoveIndex removes the index files (which will be rebuilt next time the DB is open).
