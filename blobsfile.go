@@ -189,8 +189,8 @@ type BlobsFiles struct {
 	// All blobs files opened for read
 	files map[int]*os.File
 
-	lastError      error
-	lastErrorMutex sync.Mutex // mutex for guarding the lastErr
+	lastErr      error
+	lastErrMutex sync.Mutex // mutex for guarding the lastErr
 
 	rse    reedsolomon.Encoder
 	wg     sync.WaitGroup
@@ -258,35 +258,67 @@ func (backend *BlobsFiles) closeOpenFiles() {
 
 // Stats returns some stats about the DB.
 func (backend *BlobsFiles) Stats() (*Stats, error) {
+	// Iterate the index to gather the stats
+	bchan := make(chan *blob.SizedBlobRef)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- backend.Enumerate(bchan, "", "\xff", 0)
+	}()
+	blobsCount := 0
+	var blobsSize int64
+	for ref := range bchan {
+		blobsCount++
+		blobsSize += int64(ref.Size)
+	}
+	if err := <-errc; err != nil {
+		panic(err)
+	}
+
 	backend.Lock()
 	defer backend.Unlock()
-	return &Stats{}, nil
+	var bfs int64
+	for _, f := range backend.iterOpenFiles() {
+		finfo, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		bfs += finfo.Size()
+	}
+	n, err := backend.getN()
+	if err != nil {
+		return nil, err
+	}
+
+	return &Stats{
+		BlobsFilesCount: n + 1,
+		BlobsFilesSize:  bfs,
+		BlobsCount:      blobsCount,
+		BlobsSize:       blobsSize,
+	}, nil
 }
 
 func (backend *BlobsFiles) setLastError(err error) {
-	backend.lastErrorMutex.Lock()
-	defer backend.lastErrorMutex.Unlock()
-	if err != nil {
-		backend.lastError = err
-	}
+	backend.lastErrMutex.Lock()
+	defer backend.lastErrMutex.Unlock()
+	backend.lastErr = err
 }
 
-// LastError returns the last error that may have happened in asynchronous way (like the parity blobs writing process).
-func (backend *BlobsFiles) LastError() error {
-	backend.lastErrorMutex.Lock()
-	defer backend.lastErrorMutex.Unlock()
-	if backend.lastError == nil {
+// lastError returns the last error that may have happened in asynchronous way (like the parity blobs writing process).
+func (backend *BlobsFiles) lastError() error {
+	backend.lastErrMutex.Lock()
+	defer backend.lastErrMutex.Unlock()
+	if backend.lastErr == nil {
 		return nil
 	}
-	err := backend.lastError
-	backend.lastError = nil
+	err := backend.lastErr
+	backend.lastErr = nil
 	return err
 }
 
 // Close closes all the indexes and data files.
 func (backend *BlobsFiles) Close() (err error) {
 	backend.wg.Wait()
-	if err := backend.LastError(); err != nil {
+	if err := backend.lastError(); err != nil {
 		err = err
 	}
 	backend.log.Debug("closing index...")
@@ -370,7 +402,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			return &corruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
 		}
 		// XXX(tsileo): optional flag to `BlobPos`?
-		blobPos := &blobPos{n: n, offset: int(offset), size: int(blobSize)}
+		blobPos := &blobPos{n: n, offset: offset, size: int(blobSize)}
 		offset += blobOverhead + blobSize
 		var blob []byte
 		if backend.snappyCompression {
@@ -382,6 +414,9 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 		} else {
 			blob = rawBlob
 		}
+		// Store the real blob size (i.e. the decompressed size if the data is compressed)
+		blobPos.blobSize = len(blob)
+
 		hash := fmt.Sprintf("%x", blake2b.Sum256(blob))
 		if fmt.Sprintf("%x", blobHash) == hash {
 			if iterFunc != nil {
@@ -869,6 +904,9 @@ func (backend *BlobsFiles) writeParityBlobs(f *os.File, size int) error {
 }
 
 // Put save a new blob
+//
+// If the blob is already stored, then Put will be a no-op.
+// So it's not necessary to make call Exists before saving a new blob.
 func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	// Acquire the lock
 	backend.Lock()
@@ -877,8 +915,22 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
 
-	if err := backend.LastError(); err != nil {
+	if err := backend.lastError(); err != nil {
 		return err
+	}
+
+	// 	// Ensure the data is not already stored
+	bhash, err := hex.DecodeString(hash)
+	if err != nil {
+		return err
+	}
+	bposdata, err := backend.index.db.Get(nil, formatKey(blobPosKey, bhash))
+	if err != nil {
+		return fmt.Errorf("error getting BlobPos: %v", err)
+	}
+	// The index contains data, the blob is already stored
+	if bposdata != nil {
+		return nil
 	}
 
 	// Encode the blob
@@ -939,7 +991,7 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 
 	go func() {
 		// Save the blob in the index
-		blobPos := &blobPos{n: backend.n, offset: int(backend.size), size: blobSize}
+		blobPos := &blobPos{n: backend.n, offset: backend.size, size: blobSize, blobSize: len(data)}
 		if err := backend.index.setPos(hash, blobPos); err != nil {
 			backend.putErr <- err
 			return
@@ -1040,7 +1092,7 @@ func (backend *BlobsFiles) blobPos(hash string) (*blobPos, error) {
 
 // Get returns the blob fur the given hash
 func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
-	if err := backend.LastError(); err != nil {
+	if err := backend.lastError(); err != nil {
 		return nil, err
 	}
 
@@ -1090,7 +1142,7 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end
 	backend.Lock()
 	defer backend.Unlock()
 
-	if err := backend.LastError(); err != nil {
+	if err := backend.lastError(); err != nil {
 		return err
 	}
 
@@ -1125,7 +1177,7 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end
 		// Remove the BlobPosKey prefix byte
 		sbr := &blob.SizedBlobRef{
 			Hash: hex.EncodeToString(k[1:]),
-			Size: blobPos.size,
+			Size: blobPos.blobSize,
 		}
 		blobs <- sbr
 		i++

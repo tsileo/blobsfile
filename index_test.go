@@ -14,12 +14,12 @@ func TestBlobsIndex(t *testing.T) {
 	defer index.Close()
 	defer os.RemoveAll("tmp_test_index")
 
-	bp := &blobPos{n: 1, offset: 5, size: 10}
+	bp := &blobPos{n: 1, offset: 5, size: 10, blobSize: 10}
 	h := fmt.Sprintf("%x", blake2b.Sum256([]byte("fakehash")))
 	err = index.setPos(h, bp)
 	check(err)
 	bp3, err := index.getPos(h)
-	if bp.n != bp3.n || bp.offset != bp3.offset || bp.size != bp3.size {
+	if bp.n != bp3.n || bp.offset != bp3.offset || bp.size != bp3.size || bp.blobSize != bp3.blobSize {
 		t.Errorf("index.GetPos error, expected:%q, got:%q", bp, bp3)
 	}
 
@@ -36,5 +36,15 @@ func TestBlobsIndex(t *testing.T) {
 	check(err)
 	if n2 != 100 {
 		t.Errorf("Error GetN, got %v, expected 100", n2)
+	}
+
+	for i := 0; i < 3; i++ {
+		err = index.incInt64("ok", 100)
+		check(err)
+	}
+	res, err := index.getInt64("ok")
+	check(err)
+	if res != 300 {
+		t.Errorf("expected 200, got %d", res)
 	}
 }

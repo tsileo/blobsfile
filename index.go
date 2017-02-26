@@ -46,17 +46,18 @@ type blobPos struct {
 	// bobs-n files
 	n int
 	// blobs offset/size in the blobs file
-	offset int // FIXME(tsileo): make this and size int64
-	size   int
+	offset   int64
+	size     int
+	blobSize int // the actual blob size (will be different from size if compression is enabled)
 }
 
-// Size returns the blob size.
+// Size returns the blob size (as stored in the BlobsFile).
 func (blob *blobPos) Size() int {
 	return blob.size
 }
 
 // Value serialize a BlobsPos as string.
-// (value is encoded as uvarint: n + offset + size)
+// (value is encoded as uvarint: n + offset + size + blob size)
 func (blob *blobPos) Value() []byte {
 	bufTmp := make([]byte, 10)
 	var buf bytes.Buffer
@@ -65,6 +66,8 @@ func (blob *blobPos) Value() []byte {
 	w = binary.PutUvarint(bufTmp[:], uint64(blob.offset))
 	buf.Write(bufTmp[:w])
 	w = binary.PutUvarint(bufTmp[:], uint64(blob.size))
+	buf.Write(bufTmp[:w])
+	w = binary.PutUvarint(bufTmp[:], uint64(blob.blobSize))
 	buf.Write(bufTmp[:w])
 	return buf.Bytes()
 }
@@ -84,7 +87,7 @@ func decodeBlobPos(data []byte) (blob *blobPos, error error) {
 	if err != nil {
 		return blob, err
 	}
-	blob.offset = int(ures)
+	blob.offset = int64(ures)
 
 	// read blob.size
 	ures, err = binary.ReadUvarint(r)
@@ -92,6 +95,14 @@ func decodeBlobPos(data []byte) (blob *blobPos, error error) {
 		return blob, err
 	}
 	blob.size = int(ures)
+
+	// read blob.blobSize
+	ures, err = binary.ReadUvarint(r)
+	if err != nil {
+		return blob, err
+	}
+	blob.blobSize = int(ures)
+
 	return blob, nil
 }
 
@@ -170,4 +181,19 @@ func (index *blobsIndex) getN() (int, error) {
 		return 0, nil
 	}
 	return strconv.Atoi(string(data))
+}
+
+func (index *blobsIndex) incInt64(k string, delta int64) error {
+	if _, err := index.db.Inc(formatKey(metaKey, []byte(k)), delta); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (index *blobsIndex) getInt64(k string) (int64, error) {
+	data, err := index.db.Get(nil, formatKey(metaKey, []byte(k)))
+	if err != nil {
+		return 0, nil
+	}
+	return int64(binary.BigEndian.Uint64(data)), nil
 }

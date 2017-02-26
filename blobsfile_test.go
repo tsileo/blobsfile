@@ -193,6 +193,13 @@ func backendPut(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte
 			panic(err)
 		}
 	}
+
+	stats, err := b.Stats()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("stats=%+v\n", stats)
+
 	return hashes, blobs
 }
 
