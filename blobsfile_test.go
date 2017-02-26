@@ -71,8 +71,8 @@ func BenchmarkBlobsFilePut2MBCompressed(b *testing.B) {
 }
 
 func benchmarkBlobsFilePut(back *BlobsFiles, blobSize int, b *testing.B) {
-	b.ResetTimer()
-	b.StopTimer()
+	// b.ResetTimer()
+	// b.StopTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		h, blob := randBlob(blobSize)
@@ -93,6 +93,7 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 	fname := b.filename(0)
 	b.Close()
 	// // Corrupt the file
+
 	// f, err := os.OpenFile(fname, os.O_RDWR, 0755)
 	// if err != nil {
 	// 	panic(err)

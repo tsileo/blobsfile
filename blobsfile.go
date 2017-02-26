@@ -121,13 +121,28 @@ func (ce *corruptedError) firstBadOffset() int64 {
 func firstCorruptedShard(offset int64, shardSize int) int {
 	i := 0
 	ioffset := int(offset)
-	for j := 0; j < 10; j++ {
+	for j := 0; j < dataShards; j++ {
 		if shardSize+(shardSize*i) > ioffset {
 			return i
 		}
 		i++
 	}
 	return 0
+}
+
+// Stats represents some stats about the DB state
+type Stats struct {
+	// The total number of blobs stored
+	BlobsCount int
+
+	// The size of all the blobs stored
+	BlobsSize int64
+
+	// The number of BlobsFile
+	BlobsFilesCount int
+
+	// The size of all the BlobsFile
+	BlobsFilesSize int64
 }
 
 // Opts represents the DB options
@@ -174,12 +189,15 @@ type BlobsFiles struct {
 	// All blobs files opened for read
 	files map[int]*os.File
 
+	lastError      error
+	lastErrorMutex sync.Mutex // mutex for guarding the lastErr
+
 	rse reedsolomon.Encoder
 	wg  sync.WaitGroup
 	sync.Mutex
 }
 
-// New intializes a new BlobsFileBackend
+// New intializes a new BlobsFileBackend.
 func New(opts *Opts) (*BlobsFiles, error) {
 	opts.init()
 	dir := opts.Directory
@@ -234,6 +252,30 @@ func (backend *BlobsFiles) closeOpenFiles() {
 	for _, f := range backend.files {
 		f.Close()
 	}
+}
+
+// Stats returns some stats about the DB.
+func (backend *BlobsFiles) Stats() (*Stats, error) {
+	backend.Lock()
+	defer backend.Unlock()
+	return &Stats{}, nil
+}
+
+func (backend *BlobsFiles) setLastError(err error) {
+	backend.lastErrorMutex.Lock()
+	defer backend.lastErrorMutex.Lock()
+	if err != nil {
+		backend.lastError = err
+	}
+}
+
+// LastError returns the last error that may have happened in asynchronous way (like the parity blobs writing process).
+func (backend *BlobsFiles) LastError() error {
+	backend.lastErrorMutex.Lock()
+	defer backend.lastErrorMutex.Lock()
+	err := backend.lastError
+	backend.lastError = nil
+	return err
 }
 
 // Close closes all the indexes and data files.
@@ -355,8 +397,6 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 
 func copyShards(i [][]byte) (o [][]byte) {
 	for _, a := range i {
-		// n := make([]byte, len(a))
-		// copy(n[:], a)
 		o = append(o, a)
 	}
 	return o
@@ -672,10 +712,13 @@ func (backend *BlobsFiles) wopen(n int) error {
 			return err
 		}
 	}
+	// Track if we created the file
 	created := false
 	if _, err := os.Stat(backend.filename(n)); os.IsNotExist(err) {
 		created = true
 	}
+
+	// Open the file in rw mode
 	f, err := os.OpenFile(backend.filename(n), os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
@@ -687,7 +730,7 @@ func (backend *BlobsFiles) wopen(n int) error {
 		if _, err := backend.current.Write([]byte(headerMagic)); err != nil {
 			return err
 		}
-		// // Write the reserved bytes
+		// Write the reserved bytes
 		reserved := make([]byte, 58)
 		if _, err := backend.current.Write(reserved); err != nil {
 			return err
@@ -722,16 +765,21 @@ func (backend *BlobsFiles) ropen(n int) error {
 	if err != nil {
 		return err
 	}
+
+	// Ensure the header's magic is present
 	fmagic := make([]byte, len(headerMagic))
 	_, err = f.Read(fmagic)
 	if err != nil || headerMagic != string(fmagic) {
 		return fmt.Errorf("magic not found in BlobsFile: %v or header not matching", err)
 	}
+
 	if _, err := f.Seek(int64(headerSize), os.SEEK_SET); err != nil {
 		return err
 	}
+
 	backend.files[n] = f
 	openFdsVar.Add(backend.directory, 1)
+
 	return nil
 }
 
@@ -902,7 +950,7 @@ func makeHeaderEOF(padSize int64) (h []byte) {
 	return
 }
 
-func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []byte) { // XXX(tsileo): flag as argument
+func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []byte) {
 	h := blake2b.New256()
 	h.Write(blob)
 
@@ -914,14 +962,20 @@ func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []
 		blob = dataEncoded
 		compressionAlgFlag = flagSnappy
 	}
+
 	size = len(blob)
 	data = make([]byte, len(blob)+blobOverhead)
+
 	copy(data[:], h.Sum(nil))
+
 	// set the flag
 	data[hashSize] = flag
 	data[hashSize+1] = compressionAlgFlag
+
 	binary.LittleEndian.PutUint32(data[hashSize+2:], uint32(size))
+
 	copy(data[blobOverhead:], blob)
+
 	return
 }
 

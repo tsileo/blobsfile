@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 
 	"github.com/cznic/kv"
 )
@@ -40,7 +39,6 @@ func opts() *kv.Options {
 type blobsIndex struct {
 	db   *kv.DB
 	path string
-	sync.Mutex
 }
 
 // blobPos is a blob entry in the index.
@@ -117,8 +115,6 @@ func (index *blobsIndex) formatBlobPosKey(key string) []byte {
 
 // Close closes all the open file descriptors.
 func (index *blobsIndex) Close() error {
-	index.Lock()
-	defer index.Unlock()
 	return index.db.Close()
 }
 
@@ -129,8 +125,6 @@ func (index *blobsIndex) remove() error {
 
 // setPos creates a new blobPos entry in the index for the given hash.
 func (index *blobsIndex) setPos(hexHash string, pos *blobPos) error {
-	index.Lock()
-	defer index.Unlock()
 	hash, err := hex.DecodeString(hexHash)
 	if err != nil {
 		return err
@@ -140,8 +134,6 @@ func (index *blobsIndex) setPos(hexHash string, pos *blobPos) error {
 
 // deletePos deletes the stored blobPos for the given hash.
 func (index *blobsIndex) deletePos(hexHash string) error {
-	index.Lock()
-	defer index.Unlock()
 	hash, err := hex.DecodeString(hexHash)
 	if err != nil {
 		return err
@@ -151,8 +143,6 @@ func (index *blobsIndex) deletePos(hexHash string) error {
 
 // getPos retrieve the stored blobPos for the given hash.
 func (index *blobsIndex) getPos(hexHash string) (*blobPos, error) {
-	index.Lock()
-	defer index.Unlock()
 	hash, err := hex.DecodeString(hexHash)
 	if err != nil {
 		return nil, err
@@ -170,15 +160,11 @@ func (index *blobsIndex) getPos(hexHash string) (*blobPos, error) {
 
 // setN stores the latest N (blobs-N) to remember the latest BlobsFile opened.
 func (index *blobsIndex) setN(n int) error {
-	index.Lock()
-	defer index.Unlock()
 	return index.db.Set(formatKey(metaKey, []byte("n")), []byte(strconv.Itoa(n)))
 }
 
 // getN retrieves the latest N (blobs-N) stored.
 func (index *blobsIndex) getN() (int, error) {
-	index.Lock()
-	defer index.Unlock()
 	data, err := index.db.Get(nil, formatKey(metaKey, []byte("n")))
 	if err != nil || string(data) == "" {
 		return 0, nil
