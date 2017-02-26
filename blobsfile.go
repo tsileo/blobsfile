@@ -16,10 +16,8 @@ Blobs are indexed by a BlobPos entry (value stored as string):
 
 	Blob Hash => n (BlobFile index) + (space) + offset + (space) + Blob size
 
-FIXME(tsileo): switch to canonical imports a4.io/blobsfile
-
 */
-package blobsfile
+package blobsfile // import "a4.io/blobsfile"
 
 import (
 	"bytes"
@@ -42,7 +40,6 @@ import (
 
 // TODO(tsileo): for blobs file not yet filled, propose a manual way to correct errors (like repl or s3 in blobstash?)
 // TODO(tsileo): embed the version in the header
-// TODO(tsileo): travis CI + README + badge godoc/travis
 
 const (
 	headerMagic = "\x00Blobs"
