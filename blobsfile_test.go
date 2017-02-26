@@ -188,14 +188,24 @@ func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
 	// Test we can still read everything when closing/reopening the blobsfile
 	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
-	testBackendEnumerate(t, b, hashes)
+	prefixes := map[string][]string{}
+	for _, h := range hashes {
+		if _, ok := prefixes[h[0:2]]; !ok {
+			prefixes[h[0:2]] = []string{}
+		}
+		prefixes[h[0:2]] = append(prefixes[h[0:2]], h)
+	}
+	testBackendEnumerate(t, b, hashes, "", "\xff")
+	for prefix, phashes := range prefixes {
+		testBackendEnumerate(t, b, phashes, prefix, prefix+"\xff")
+	}
 	testBackendGet(t, b, hashes, blobs)
 	b.Close()
 	b.RemoveIndex()
 	// Try with the index and removed and test re-indexing
 	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
-	testBackendEnumerate(t, b, hashes)
+	testBackendEnumerate(t, b, hashes, "", "\xff")
 	testBackendGet(t, b, hashes, blobs)
 }
 
@@ -224,7 +234,7 @@ func backendPut(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte
 func testBackendPutGetEnumerate(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
 	hashes, blobs := backendPut(t, b, blobsCount)
 	testBackendGet(t, b, hashes, blobs)
-	testBackendEnumerate(t, b, hashes)
+	testBackendEnumerate(t, b, hashes, "", "\xff")
 	return hashes, blobs
 }
 
@@ -248,12 +258,12 @@ func testBackendGet(t *testing.T, b *BlobsFiles, hashes []string, blobs [][]byte
 	}
 }
 
-func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string) []string {
+func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string, start, end string) []string {
 	sort.Strings(hashes)
 	bchan := make(chan *Blob)
 	errc := make(chan error, 1)
 	go func() {
-		errc <- b.Enumerate(bchan, "", "\xff", 0)
+		errc <- b.Enumerate(bchan, start, end, 0)
 	}()
 	enumHashes := []string{}
 	for ref := range bchan {
