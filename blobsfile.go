@@ -16,10 +16,10 @@ Blobs are indexed by a BlobPos entry (value stored as string):
 
 	Blob Hash => n (BlobFile index) + (space) + offset + (space) + Blob size
 
+FIXME(tsileo): switch to canonical imports a4.io/blobsfile
+
 */
 package blobsfile
-
-// FIXME(tsileo): switch to canonical imports a4.io/blobsfile
 
 import (
 	"bytes"
@@ -763,7 +763,7 @@ func (backend *BlobsFiles) writeParityBlobs() error {
 	}
 
 	// Save the parity blobs
-	parityBlobs := shards[dataShards:len(shards)]
+	parityBlobs := shards[dataShards:]
 	for _, parityBlob := range parityBlobs {
 		_, parityBlobEncoded := backend.encodeBlob(parityBlob, flagParityBlob)
 
@@ -957,7 +957,7 @@ func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 		return nil, fmt.Errorf("Error reading blob: %v / blobsfile: %+v", err, backend.files[blobPos.n])
 	}
 
-	// Ensure the data lenght is expcted
+	// Ensure the data length is expcted
 	if n != blobPos.size+blobOverhead {
 		return nil, fmt.Errorf("Error reading blob %v, read %v, expected %v+%v", hash, n, blobPos.size, blobOverhead)
 	}
