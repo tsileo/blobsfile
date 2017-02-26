@@ -374,25 +374,31 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			}
 			return &corruptedError{nil, offset, fmt.Errorf("failed to read hash: %v", err)}
 		}
+
 		if _, err := blobsfile.Read(flags); err != nil {
 			return &corruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
+
 		// If we reached the EOF blob, break
 		if flags[0] == flagEOF {
 			break
 		}
+
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
 			return &corruptedError{nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
 		}
+
 		blobSize := int64(binary.LittleEndian.Uint32(blobSizeEncoded))
 		rawBlob := make([]byte, int(blobSize))
 		read, err := blobsfile.Read(rawBlob)
 		if err != nil || read != int(blobSize) {
 			return &corruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
 		}
+
 		// XXX(tsileo): optional flag to `BlobPos`?
 		blobPos := &blobPos{n: n, offset: offset, size: int(blobSize)}
 		offset += blobOverhead + blobSize
+
 		var blob []byte
 		if backend.snappyCompression {
 			blobDecoded, err := snappy.Decode(nil, rawBlob)
@@ -448,13 +454,16 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 		// We can rebuild the parity blobs if needed
 		// FIXME(tsileo): do it
 	}
+
 	if err != nil && (pShards == nil || len(pShards) == 0) {
 		return fmt.Errorf("no parity shards available, can't recover")
 	}
+
 	if err == nil {
 		fmt.Printf("noting to repair")
 		return nil
 	}
+
 	if pShards == nil || len(pShards) != parityShards {
 		var l int
 		if pShards != nil {
@@ -467,6 +476,7 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 			pShards = append(pShards, nil)
 		}
 	}
+
 	dataShardIndex := 0
 	if err != nil {
 		if cerr, ok := err.(*corruptedError); ok {
@@ -476,28 +486,35 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 			fmt.Printf("dataShardIndex=%d\n", dataShardIndex)
 		}
 	}
+
 	missing := []int{}
 	for i := dataShardIndex; i < 10; i++ {
 		missing = append(missing, i)
 	}
 	fmt.Printf("missing=%+v\n", missing)
+
 	dShards, err := backend.dataShards(n)
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("try #1\n")
 	if len(missing) <= parityCnt {
 		shards := copyShards(append(dShards, pShards...))
+
 		for _, idx := range missing {
 			shards[idx] = nil
 		}
+
 		if err := backend.rse.Reconstruct(shards); err != nil {
 			return err
 		}
+
 		ok, err := backend.rse.Verify(shards)
 		if err != nil {
 			return err
 		}
+
 		if ok {
 			// FIXME(tsileo): update/fix the data
 			fmt.Printf("reconstruct successful\n")
@@ -511,13 +528,16 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 	for i := dataShardIndex; i < 10; i++ {
 		shards := copyShards(append(dShards, pShards...))
 		shards[i] = nil
+
 		if err := backend.rse.Reconstruct(shards); err != nil {
 			return err
 		}
+
 		ok, err := backend.rse.Verify(shards)
 		if err != nil {
 			return err
 		}
+
 		if ok {
 			// FIXME(tsileo): update/fix the data
 			fmt.Printf("reconstruct successful\n")
@@ -533,17 +553,21 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 				if j == i {
 					continue
 				}
+
 				shards := copyShards(append(dShards, pShards...))
-				// fmt.Printf("setting i=%d,j=%d to nil\n", i, j)
+
 				shards[i] = nil
 				shards[j] = nil
+
 				if err := backend.rse.Reconstruct(shards); err != nil {
 					return err
 				}
+
 				ok, err := backend.rse.Verify(shards)
 				if err != nil {
 					return err
 				}
+
 				if ok {
 					// FIXME(tsileo): update/fix the data
 					fmt.Printf("reconstruct successful\n")
@@ -569,6 +593,7 @@ func (backend *BlobsFiles) dataShards(n int) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return shards[:10], nil
 }
 
@@ -578,6 +603,7 @@ func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 	if _, err := backend.files[n].Seek(backend.maxBlobsFileSize, os.SEEK_SET); err != nil {
 		return nil, fmt.Errorf("failed to seek to parity shards: %v", err)
 	}
+
 	blobsfile := backend.files[n]
 	parityBlobs := [][]byte{}
 
@@ -589,22 +615,28 @@ func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 		if _, err := blobsfile.Read(blobHash); err == io.EOF {
 			return parityBlobs, fmt.Errorf("missing parity blob, only found %d", len(parityBlobs))
 		}
+
 		if _, err := blobsfile.Read(flags); err != nil {
 			return parityBlobs, fmt.Errorf("failed to read flag: %v", err)
 		}
+
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
 			return parityBlobs, err
 		}
+
 		blobSize := binary.LittleEndian.Uint32(blobSizeEncoded)
+
 		blob := make([]byte, int(blobSize))
 		read, err := blobsfile.Read(blob)
 		if err != nil || read != int(blobSize) {
 			return parityBlobs, fmt.Errorf("error while reading raw blob: %v", err)
 		}
+
 		hash := fmt.Sprintf("%x", blake2b.Sum256(blob))
 		if fmt.Sprintf("%x", blobHash) != hash {
 			return parityBlobs, errParityBlobCorrupted
 		}
+
 		parityBlobs = append(parityBlobs, blob)
 	}
 	return parityBlobs, nil
@@ -615,10 +647,12 @@ func (backend *BlobsFiles) checkParityBlobs(n int) error {
 	if err != nil {
 		return fmt.Errorf("failed to build data shards: %v", err)
 	}
+
 	parityShards, err := backend.parityShards(n)
 	if err != nil {
 		return fmt.Errorf("failed to build parity shards: %v", err)
 	}
+
 	shards := append(dataShards, parityShards...)
 
 	// Verify the integrity of the data
@@ -626,9 +660,11 @@ func (backend *BlobsFiles) checkParityBlobs(n int) error {
 	if err != nil {
 		return fmt.Errorf("failed to verify shards: %v", err)
 	}
+
 	if !ok {
 		return ErrBlobsfileCorrupted
 	}
+
 	return nil
 }
 
@@ -689,6 +725,7 @@ func (backend *BlobsFiles) reindex() error {
 func (backend *BlobsFiles) load() error {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
+
 	n := 0
 	for {
 		err := backend.ropen(n)
@@ -701,6 +738,7 @@ func (backend *BlobsFiles) load() error {
 		}
 		n++
 	}
+
 	if n == 0 {
 		// The dir is empty, create a new blobs-XXXXX file,
 		// and open it for read
@@ -715,13 +753,16 @@ func (backend *BlobsFiles) load() error {
 		}
 		return nil
 	}
+
 	// Open the last file for write
 	if err := backend.wopen(n - 1); err != nil {
 		return err
 	}
+
 	if err := backend.saveN(); err != nil {
 		return err
 	}
+
 	if backend.reindexMode {
 		if err := backend.reindex(); err != nil {
 			return err
@@ -739,6 +780,7 @@ func (backend *BlobsFiles) wopen(n int) error {
 			return err
 		}
 	}
+
 	// Track if we created the file
 	created := false
 	if _, err := os.Stat(backend.filename(n)); os.IsNotExist(err) {
@@ -750,8 +792,10 @@ func (backend *BlobsFiles) wopen(n int) error {
 	if err != nil {
 		return err
 	}
+
 	backend.current = f
 	backend.n = n
+
 	if created {
 		// Write the header/magic number
 		if _, err := backend.current.Write([]byte(headerMagic)); err != nil {
@@ -768,11 +812,14 @@ func (backend *BlobsFiles) wopen(n int) error {
 			panic(err)
 		}
 	}
+
 	backend.size, err = f.Seek(0, os.SEEK_END)
 	if err != nil {
 		return err
 	}
+
 	openFdsVar.Add(backend.directory, 1)
+
 	return nil
 }
 
@@ -884,7 +931,7 @@ func (backend *BlobsFiles) writeParityBlobs(f *os.File, size int) error {
 	return nil
 }
 
-// Put save a new blob
+// Put save a new blob, hash must be the blake2b hash hex-encoded of the data.
 //
 // If the blob is already stored, then Put will be a no-op.
 // So it's not necessary to make call Exists before saving a new blob.
@@ -999,18 +1046,23 @@ func (backend *BlobsFiles) Exists(hash string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
 	if blobPos != nil {
 		return true, nil
 	}
+
 	return false, nil
 }
 
 func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
 	flag = data[hashSize]
 	compressionAlgFlag := data[hashSize+1]
+
 	size = int(binary.LittleEndian.Uint32(data[hashSize+2 : blobOverhead]))
+
 	blob = make([]byte, size)
 	copy(blob, data[blobOverhead:])
+
 	if backend.snappyCompression && flag == flagCompressed && compressionAlgFlag == flagSnappy {
 		blobDecoded, err := snappy.Decode(nil, blob)
 		if err != nil {
@@ -1019,11 +1071,14 @@ func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag 
 		flag = flagBlob
 		blob = blobDecoded
 	}
+
 	h := blake2b.New256()
 	h.Write(blob)
+
 	if !bytes.Equal(h.Sum(nil), data[0:hashSize]) {
 		panic(fmt.Errorf("Hash doesn't match %x != %x", h.Sum(nil), data[0:hashSize]))
 	}
+
 	return
 }
 
@@ -1070,7 +1125,7 @@ func (backend *BlobsFiles) blobPos(hash string) (*blobPos, error) {
 	return backend.index.getPos(hash)
 }
 
-// Get returns the blob fur the given hash
+// Get returns the blob for the given hash.
 func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 	if err := backend.lastError(); err != nil {
 		return nil, err
@@ -1115,8 +1170,7 @@ func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 	return blob, nil
 }
 
-// Enumerate output all the blobs into the given chan (ordered lexicographically)
-// TODO(tsileo) take a callback func(hash string, size int) error
+// Enumerate outputs all the blobs into the given chan (ordered lexicographically).
 func (backend *BlobsFiles) Enumerate(blobs chan<- *Blob, start, end string, limit int) error {
 	defer close(blobs)
 	backend.Lock()
@@ -1126,41 +1180,41 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *Blob, start, end string, limi
 		return err
 	}
 
-	// TODO(tsileo) send the size along the hashes ?
-	// fmt.Printf("start=%v/%+v\n", start, formatKey(BlobPosKey, []byte(start)))
 	s, err := hex.DecodeString(start)
 	if err != nil {
 		return err
 	}
 	enum, _, err := backend.index.db.Seek(formatKey(blobPosKey, s))
-	// endBytes := formatKey(BlobPosKey, []byte(end))
-	endBytes := []byte(end)
-	// formatKey(BlobPosKey, []byte(end))
 	if err != nil {
 		return err
 	}
+	endBytes := []byte(end)
+
 	i := 0
 	for {
 		k, _, err := enum.Next()
 		if err == io.EOF {
 			break
 		}
+
 		hash := hex.EncodeToString(k[1:])
-		// fmt.Printf("\n\n\nhash=%s\nend=%s\ncmp=%v\n\n\n", hash, endBytes, bytes.Compare([]byte(hash), endBytes))
 		if bytes.Compare([]byte(hash), endBytes) > 0 || (limit != 0 && i > limit) {
 			return nil
 		}
+
 		blobPos, err := backend.blobPos(hash)
 		if err != nil {
 			return nil
 		}
+
 		// Remove the BlobPosKey prefix byte
-		sbr := &Blob{
-			Hash: hex.EncodeToString(k[1:]),
+		blobs <- &Blob{
+			Hash: hash,
 			Size: blobPos.blobSize,
 		}
-		blobs <- sbr
+
 		i++
 	}
+
 	return nil
 }
