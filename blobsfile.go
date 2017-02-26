@@ -265,7 +265,7 @@ func (backend *BlobsFiles) Stats() (*Stats, error) {
 
 func (backend *BlobsFiles) setLastError(err error) {
 	backend.lastErrorMutex.Lock()
-	defer backend.lastErrorMutex.Lock()
+	defer backend.lastErrorMutex.Unlock()
 	if err != nil {
 		backend.lastError = err
 	}
@@ -274,17 +274,26 @@ func (backend *BlobsFiles) setLastError(err error) {
 // LastError returns the last error that may have happened in asynchronous way (like the parity blobs writing process).
 func (backend *BlobsFiles) LastError() error {
 	backend.lastErrorMutex.Lock()
-	defer backend.lastErrorMutex.Lock()
+	defer backend.lastErrorMutex.Unlock()
+	if backend.lastError == nil {
+		return nil
+	}
 	err := backend.lastError
 	backend.lastError = nil
 	return err
 }
 
 // Close closes all the indexes and data files.
-func (backend *BlobsFiles) Close() error {
+func (backend *BlobsFiles) Close() (err error) {
 	backend.wg.Wait()
+	if err := backend.LastError(); err != nil {
+		err = err
+	}
 	backend.log.Debug("closing index...")
-	return backend.index.Close()
+	if err := backend.index.Close(); err != nil {
+		err = err
+	}
+	return
 }
 
 // RemoveIndex removes the index files (which will be rebuilt next time the DB is open).
@@ -791,18 +800,39 @@ func (backend *BlobsFiles) filename(n int) string {
 
 // writeParityBlobs compute and write the 4 parity shards using Reed-Solomon 10,4 and write them at
 // end the blobsfile, and write the "data size" (blobsfile size before writing the parity shards).
-func (backend *BlobsFiles) writeParityBlobs() error {
+func (backend *BlobsFiles) writeParityBlobs(f *os.File, size int) error {
 	start := time.Now()
+
+	backend.wg.Add(1)
+	defer backend.wg.Done()
+
+	// First we write the padding blob
+	paddingLen := backend.maxBlobsFileSize - (int64(size) + blobOverhead)
+	headerEOF := makeHeaderEOF(paddingLen)
+	n, err := f.Write(headerEOF)
+	if err != nil {
+		return fmt.Errorf("failed to write EOF header: %v", err)
+	}
+	size += n
+
+	padding := make([]byte, paddingLen)
+	n, err = f.Write(padding)
+	if err != nil {
+		return fmt.Errorf("failed to write padding 0: %v", err)
+	}
+	size += n
+
 	// We write the data size at the end of the file
-	if _, err := backend.current.Seek(0, os.SEEK_END); err != nil {
+	if _, err := f.Seek(0, os.SEEK_END); err != nil {
 		return err
 	}
 
 	// Read the whole blobsfile
-	fdata := make([]byte, backend.size)
-	if _, err := backend.current.ReadAt(fdata, 0); err != nil {
+	fdata := make([]byte, size)
+	if _, err := f.ReadAt(fdata, 0); err != nil {
 		return err
 	}
+
 	// Split into shards
 	shards, err := backend.rse.Split(fdata)
 	if err != nil {
@@ -818,16 +848,20 @@ func (backend *BlobsFiles) writeParityBlobs() error {
 	for _, parityBlob := range parityBlobs {
 		_, parityBlobEncoded := backend.encodeBlob(parityBlob, flagParityBlob)
 
-		n, err := backend.current.Write(parityBlobEncoded)
-		backend.size += int64(len(parityBlobEncoded))
+		n, err := f.Write(parityBlobEncoded)
+		// backend.size += int64(len(parityBlobEncoded))
 		if err != nil || n != len(parityBlobEncoded) {
 			return fmt.Errorf("Error writing parity blob (%v,%v)", err, n)
 		}
 	}
 
 	// Fsync
-	if err = backend.current.Sync(); err != nil {
-		panic(err)
+	if err = f.Sync(); err != nil {
+		return err
+	}
+
+	if err := f.Close(); err != nil {
+		return err
 	}
 	duration := time.Since(start)
 	fmt.Printf("parity encoding done in %s\n", duration)
@@ -843,60 +877,50 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
 
+	if err := backend.LastError(); err != nil {
+		return err
+	}
+
 	// Encode the blob
 	blobSize, blobEncoded := backend.encodeBlob(data, flagBlob)
 
+	var newBlobsFileNeeded bool
+
 	// Ensure the blosfile size won't exceed the maxBlobsFileSize
 	if backend.size+int64(blobSize+blobOverhead) > backend.maxBlobsFileSize {
-		paddingLen := backend.maxBlobsFileSize - (backend.size + blobOverhead)
-		headerEOF := makeHeaderEOF(paddingLen)
-		n, err := backend.current.Write(headerEOF)
-		if err != nil {
-			return fmt.Errorf("failed to write EOF header: %v", err)
-		}
-		backend.size += int64(n)
+		var f *os.File
+		f = backend.current
+		backend.current = nil
+		newBlobsFileNeeded = true
 
-		padding := make([]byte, paddingLen)
-		n, err = backend.current.Write(padding)
-		if err != nil {
-			return fmt.Errorf("failed to write padding 0: %v", err)
-		}
-		backend.size += int64(n)
-
-		// Write some parity blobs at the end of the blobsfile using Reed-Solomon erasure coding
-		// XXX(tsileo): this process can be done async, but then how do we notify an error if it happens?
-		if err := backend.writeParityBlobs(); err != nil {
-			return err
-		}
-
-		// Archive this blobsfile, start by creating a new one
-		backend.n++
-		backend.log.Debug("creating a new BlobsFile")
-		if err := backend.wopen(backend.n); err != nil {
-			panic(err)
-		}
-		// Re-open it (since we may need to read blobs from it)
-		if err := backend.ropen(backend.n); err != nil {
-			panic(err)
-		}
-		// Update the nimber of blobsfile in the index
-		if err := backend.saveN(); err != nil {
-			panic(err)
-		}
+		// This goroutine will write the parity blobs and close the file
+		go func(f *os.File, size int) {
+			// Write some parity blobs at the end of the blobsfile using Reed-Solomon erasure coding
+			if err := backend.writeParityBlobs(f, size); err != nil {
+				backend.setLastError(err)
+			}
+		}(f, int(backend.size))
 	}
 
+	// We're writing to two different files, so we can parallelized the writes
 	go func() {
-		// Save the blob in the index
-		blobPos := &blobPos{n: backend.n, offset: int(backend.size), size: blobSize}
-		if err := backend.index.setPos(hash, blobPos); err != nil {
-			backend.putErr <- err
-			return
+		if newBlobsFileNeeded {
+			// Archive this blobsfile, start by creating a new one
+			backend.n++
+			backend.log.Debug("creating a new BlobsFile")
+			if err := backend.wopen(backend.n); err != nil {
+				panic(err)
+			}
+			// Re-open it (since we may need to read blobs from it)
+			if err := backend.ropen(backend.n); err != nil {
+				panic(err)
+			}
+			// Update the nimber of blobsfile in the index
+			if err := backend.saveN(); err != nil {
+				panic(err)
+			}
 		}
 
-		backend.putErr <- nil
-	}()
-
-	go func() {
 		// Save the blob in the BlobsFile
 		n, err := backend.current.Write(blobEncoded)
 		backend.size += int64(len(blobEncoded))
@@ -913,6 +937,18 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 		backend.putErr <- nil
 	}()
 
+	go func() {
+		// Save the blob in the index
+		blobPos := &blobPos{n: backend.n, offset: int(backend.size), size: blobSize}
+		if err := backend.index.setPos(hash, blobPos); err != nil {
+			backend.putErr <- err
+			return
+		}
+
+		backend.putErr <- nil
+	}()
+
+	// Wait for the two goroutines to finish
 	for i := 0; i < 2; i++ {
 		if err := <-backend.putErr; err != nil {
 			return err
@@ -1004,6 +1040,10 @@ func (backend *BlobsFiles) blobPos(hash string) (*blobPos, error) {
 
 // Get returns the blob fur the given hash
 func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
+	if err := backend.LastError(); err != nil {
+		return nil, err
+	}
+
 	// Fetch the index entry
 	blobPos, err := backend.index.getPos(hash)
 	if err != nil {
@@ -1049,6 +1089,11 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end
 	defer close(blobs)
 	backend.Lock()
 	defer backend.Unlock()
+
+	if err := backend.LastError(); err != nil {
+		return err
+	}
+
 	// TODO(tsileo) send the size along the hashes ?
 	// fmt.Printf("start=%v/%+v\n", start, formatKey(BlobPosKey, []byte(start)))
 	s, err := hex.DecodeString(start)
