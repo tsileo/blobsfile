@@ -200,11 +200,15 @@ func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
 		testBackendEnumerate(t, b, phashes, prefix, prefix+"\xff")
 	}
 	testBackendGet(t, b, hashes, blobs)
-	b.Close()
-	b.RemoveIndex()
+	if err := b.Close(); err != nil {
+		panic(err)
+	}
 	// Try with the index and removed and test re-indexing
 	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
+	if err := b.RebuildIndex(); err != nil {
+		panic(err)
+	}
 	testBackendEnumerate(t, b, hashes, "", "\xff")
 	testBackendGet(t, b, hashes, blobs)
 }

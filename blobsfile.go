@@ -321,9 +321,12 @@ func (backend *BlobsFiles) Close() error {
 	return err
 }
 
-// RemoveIndex removes the index files (which will be rebuilt next time the DB is open).
-func (backend *BlobsFiles) RemoveIndex() error {
-	return backend.index.remove()
+// RebuildIndex removes the index files and re-build it by re-scanning all the BlobsFiles.
+func (backend *BlobsFiles) RebuildIndex() error {
+	if err := backend.index.remove(); err != nil {
+		return nil
+	}
+	return backend.reindex()
 }
 
 // getN returns the total numbers of BlobsFile.
