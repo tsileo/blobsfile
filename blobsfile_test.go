@@ -11,8 +11,6 @@ import (
 	"sort"
 	"testing"
 
-	_ "a4.io/blobstash/pkg/backend"
-	pblob "a4.io/blobstash/pkg/blob"
 	"a4.io/blobstash/pkg/hashutil"
 )
 
@@ -232,7 +230,7 @@ func testBackendGet(t *testing.T, b *BlobsFiles, hashes []string, blobs [][]byte
 
 func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string) []string {
 	sort.Strings(hashes)
-	bchan := make(chan *pblob.SizedBlobRef)
+	bchan := make(chan *Blob)
 	errc := make(chan error, 1)
 	go func() {
 		errc <- b.Enumerate(bchan, "", "\xff", 0)

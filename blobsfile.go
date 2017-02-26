@@ -38,10 +38,6 @@ import (
 	"github.com/dchest/blake2b"
 	"github.com/golang/snappy"
 	"github.com/klauspost/reedsolomon"
-	log2 "gopkg.in/inconshreveable/log15.v2"
-
-	"a4.io/blobstash/pkg/blob"
-	"a4.io/blobstash/pkg/logger"
 )
 
 // TODO(tsileo): for blobs file not yet filled, propose a manual way to correct errors (like repl or s3 in blobstash?)
@@ -165,7 +161,6 @@ func (o *Opts) init() {
 
 // BlobsFiles represent the DB
 type BlobsFiles struct {
-	log log2.Logger
 	// Directory which holds the blobsfile
 	directory string
 
@@ -196,6 +191,12 @@ type BlobsFiles struct {
 	wg     sync.WaitGroup
 	putErr chan error
 	sync.Mutex
+}
+
+// Blob represents a blob hash and size when enumerating the DB.
+type Blob struct {
+	Hash string
+	Size int
 }
 
 // New intializes a new BlobsFileBackend.
@@ -231,15 +232,10 @@ func New(opts *Opts) (*BlobsFiles, error) {
 		reindexMode:       reindex,
 		putErr:            make(chan error, 2),
 	}
-	backend.log = logger.Log.New("backend", backend.String())
-	backend.log.Debug("Started")
 	if err := backend.load(); err != nil {
 		panic(fmt.Errorf("Error loading %T: %v", backend, err))
 	}
 	// TODO(tsileo): fix the backend and prepare for multiple compressions algs
-	if backend.snappyCompression {
-		backend.log.Debug("snappy compression enabled")
-	}
 	return backend, nil
 }
 
@@ -258,8 +254,8 @@ func (backend *BlobsFiles) closeOpenFiles() {
 
 // Stats returns some stats about the DB.
 func (backend *BlobsFiles) Stats() (*Stats, error) {
-	// Iterate the index to gather the stats
-	bchan := make(chan *blob.SizedBlobRef)
+	// Iterate the index to gather the stats (Enumerate will acquire the lock)
+	bchan := make(chan *Blob)
 	errc := make(chan error, 1)
 	go func() {
 		errc <- backend.Enumerate(bchan, "", "\xff", 0)
@@ -321,7 +317,6 @@ func (backend *BlobsFiles) Close() (err error) {
 	if err := backend.lastError(); err != nil {
 		err = err
 	}
-	backend.log.Debug("closing index...")
 	if err := backend.index.Close(); err != nil {
 		err = err
 	}
@@ -428,8 +423,6 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			// FIXME(tsileo): continue an try to repair it?
 		} else {
 			// better out an error and provides a CLI for repairing
-			fmt.Printf("corrupted\n")
-			backend.log.Error(fmt.Sprintf("hash doesn't match %v/%v", fmt.Sprintf("%x", blobHash), hash))
 			corrupted = append(corrupted, blobPos)
 		}
 	}
@@ -658,7 +651,6 @@ func (backend *BlobsFiles) scan(iterFunc func(*blobPos, byte, string, []byte) er
 		n++
 	}
 	if n == 0 {
-		backend.log.Debug("no BlobsFiles found for re-indexing")
 		return nil
 	}
 	return nil
@@ -668,7 +660,6 @@ func (backend *BlobsFiles) scan(iterFunc func(*blobPos, byte, string, []byte) er
 func (backend *BlobsFiles) reindex() error {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
-	backend.log.Info("re-indexing BlobsFiles...")
 	n := 0
 	blobsIndexed := 0
 
@@ -692,7 +683,6 @@ func (backend *BlobsFiles) reindex() error {
 	// FIXME(tsileo): check for CorruptedError and initialize a repair
 
 	if n == 0 {
-		backend.log.Debug("no BlobsFiles found for re-indexing")
 		return nil
 	}
 	if err := backend.saveN(); err != nil {
@@ -705,7 +695,6 @@ func (backend *BlobsFiles) reindex() error {
 func (backend *BlobsFiles) load() error {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
-	backend.log.Debug("BlobsFileBackend: scanning BlobsFiles...")
 	n := 0
 	for {
 		err := backend.ropen(n)
@@ -716,7 +705,6 @@ func (backend *BlobsFiles) load() error {
 		if err != nil {
 			return err
 		}
-		backend.log.Debug("BlobsFile loaded", "name", backend.filename(n))
 		n++
 	}
 	if n == 0 {
@@ -750,7 +738,6 @@ func (backend *BlobsFiles) load() error {
 
 // Open a file for writing, will close the previously open file if any.
 func (backend *BlobsFiles) wopen(n int) error {
-	backend.log.Info("opening blobsfile for writing", "name", backend.filename(n))
 	// Close the already opened file if any
 	if backend.current != nil {
 		if err := backend.current.Close(); err != nil {
@@ -959,7 +946,6 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 		if newBlobsFileNeeded {
 			// Archive this blobsfile, start by creating a new one
 			backend.n++
-			backend.log.Debug("creating a new BlobsFile")
 			if err := backend.wopen(backend.n); err != nil {
 				panic(err)
 			}
@@ -1137,7 +1123,7 @@ func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 
 // Enumerate output all the blobs into the given chan (ordered lexicographically)
 // TODO(tsileo) take a callback func(hash string, size int) error
-func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end string, limit int) error {
+func (backend *BlobsFiles) Enumerate(blobs chan<- *Blob, start, end string, limit int) error {
 	defer close(blobs)
 	backend.Lock()
 	defer backend.Unlock()
@@ -1175,7 +1161,7 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *blob.SizedBlobRef, start, end
 			return nil
 		}
 		// Remove the BlobPosKey prefix byte
-		sbr := &blob.SizedBlobRef{
+		sbr := &Blob{
 			Hash: hex.EncodeToString(k[1:]),
 			Size: blobPos.blobSize,
 		}
