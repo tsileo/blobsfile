@@ -116,15 +116,15 @@ func (index *blobsIndex) formatBlobPosKey(key string) []byte {
 }
 
 // Close closes all the open file descriptors.
-func (index *blobsIndex) Close() {
+func (index *blobsIndex) Close() error {
 	index.Lock()
 	defer index.Unlock()
-	index.db.Close()
+	return index.db.Close()
 }
 
 // remove removes the kv file.
-func (index *blobsIndex) remove() {
-	os.RemoveAll(index.path)
+func (index *blobsIndex) remove() error {
+	return os.RemoveAll(index.path)
 }
 
 // setPos creates a new blobPos entry in the index for the given hash.

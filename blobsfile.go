@@ -152,7 +152,7 @@ func (o *Opts) init() {
 type BlobsFiles struct {
 	log log2.Logger
 	// Directory which holds the blobsfile
-	Directory string
+	directory string
 
 	// Maximum size for a blobsfile (256MB by default)
 	maxBlobsFileSize int64
@@ -203,7 +203,7 @@ func New(opts *Opts) (*BlobsFiles, error) {
 	}
 
 	backend := &BlobsFiles{
-		Directory:         dir,
+		directory:         dir,
 		snappyCompression: !opts.DisableCompression,
 		index:             index,
 		files:             make(map[int]*os.File),
@@ -216,6 +216,7 @@ func New(opts *Opts) (*BlobsFiles, error) {
 	if err := backend.load(); err != nil {
 		panic(fmt.Errorf("Error loading %T: %v", backend, err))
 	}
+	// TODO(tsileo): fix the backend and prepare for multiple compressions algs
 	if backend.snappyCompression {
 		backend.log.Debug("snappy compression enabled")
 	}
@@ -236,19 +237,19 @@ func (backend *BlobsFiles) closeOpenFiles() {
 }
 
 // Close closes all the indexes and data files.
-func (backend *BlobsFiles) Close() {
+func (backend *BlobsFiles) Close() error {
 	backend.wg.Wait()
 	backend.log.Debug("closing index...")
-	backend.index.Close()
+	return backend.index.Close()
 }
 
 // RemoveIndex removes the index files (which will be rebuilt next time the DB is open).
-func (backend *BlobsFiles) RemoveIndex() {
-	backend.index.remove()
+func (backend *BlobsFiles) RemoveIndex() error {
+	return backend.index.remove()
 }
 
-// GetN returns the total numbers of BlobsFile.
-func (backend *BlobsFiles) GetN() (int, error) {
+// getN returns the total numbers of BlobsFile.
+func (backend *BlobsFiles) getN() (int, error) {
 	return backend.index.getN()
 }
 
@@ -267,7 +268,7 @@ func (backend *BlobsFiles) restoreN() error {
 
 // String implements the Stringer interface.
 func (backend *BlobsFiles) String() string {
-	return fmt.Sprintf("blobsfile-%v", backend.Directory)
+	return fmt.Sprintf("blobsfile-%v", backend.directory)
 }
 
 func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, string, []byte) error) error {
@@ -667,7 +668,7 @@ func (backend *BlobsFiles) wopen(n int) error {
 	// Close the already opened file if any
 	if backend.current != nil {
 		if err := backend.current.Close(); err != nil {
-			openFdsVar.Add(backend.Directory, -1)
+			openFdsVar.Add(backend.directory, -1)
 			return err
 		}
 	}
@@ -701,7 +702,7 @@ func (backend *BlobsFiles) wopen(n int) error {
 	if err != nil {
 		return err
 	}
-	openFdsVar.Add(backend.Directory, 1)
+	openFdsVar.Add(backend.directory, 1)
 	return nil
 }
 
@@ -730,12 +731,12 @@ func (backend *BlobsFiles) ropen(n int) error {
 		return err
 	}
 	backend.files[n] = f
-	openFdsVar.Add(backend.Directory, 1)
+	openFdsVar.Add(backend.directory, 1)
 	return nil
 }
 
 func (backend *BlobsFiles) filename(n int) string {
-	return filepath.Join(backend.Directory, fmt.Sprintf("blobs-%05d", n))
+	return filepath.Join(backend.directory, fmt.Sprintf("blobs-%05d", n))
 }
 
 // writeParityBlobs compute and write the 4 parity shards using Reed-Solomon 10,4 and write them at
@@ -853,14 +854,9 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	}
 
 	// Update the expvars
-	bytesUploaded.Add(backend.Directory, int64(len(blobEncoded)))
-	blobsUploaded.Add(backend.Directory, 1)
+	bytesUploaded.Add(backend.directory, int64(len(blobEncoded)))
+	blobsUploaded.Add(backend.directory, 1)
 	return
-}
-
-// Stat is an alias for `Exists`.
-func (backend *BlobsFiles) Stat(hash string) (bool, error) {
-	return backend.Exists(hash)
 }
 
 // Exists return true if the blobs is already stored.
@@ -969,8 +965,8 @@ func (backend *BlobsFiles) Get(hash string) ([]byte, error) {
 	}
 
 	// Update the expvars
-	bytesDownloaded.Add(backend.Directory, int64(blobSize))
-	blobsUploaded.Add(backend.Directory, 1)
+	bytesDownloaded.Add(backend.directory, int64(blobSize))
+	blobsUploaded.Add(backend.directory, 1)
 
 	return blob, nil
 }
