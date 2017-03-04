@@ -4,7 +4,7 @@ Package blobsfile implement the BlobsFile backend for storing blobs.
 
 It stores multiple blobs (optionally compressed with Snappy) inside "BlobsFile"/fat file/packed file
 (256MB by default).
-Blobs are indexed by a kv file.
+Blobs are indexed by a kv file (that can be rebuild from the blobsfile).
 
 New blobs are appended to the current file, and when the file exceed the limit, a new fie is created.
 
@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,6 +80,33 @@ var (
 
 	errParityBlobCorrupted = errors.New("a parity blob is corrupted")
 )
+
+// multiError wraps multiple errors in a single one
+type multiError struct {
+	errors []error
+}
+
+func (me *multiError) Error() string {
+	if me.errors == nil {
+		return "multiError:"
+	}
+	var errs []string
+	for _, err := range me.errors {
+		errs = append(errs, err.Error())
+	}
+	return fmt.Sprintf("multiError: %s", strings.Join(errs, ", "))
+}
+
+func (me *multiError) Append(err error) {
+	me.errors = append(me.errors, err)
+}
+
+func (me *multiError) Nil() bool {
+	if me.errors == nil || len(me.errors) == 0 {
+		return true
+	}
+	return false
+}
 
 // corruptedError give more about the corruption of a BlobsFile
 type corruptedError struct {
@@ -260,6 +288,7 @@ func (backend *BlobsFiles) Stats() (*Stats, error) {
 		panic(err)
 	}
 
+	// Now iterate the raw blobsfile for gethering stats
 	backend.Lock()
 	defer backend.Unlock()
 	var bfs int64
@@ -283,6 +312,7 @@ func (backend *BlobsFiles) Stats() (*Stats, error) {
 	}, nil
 }
 
+// setLastError is used by goroutine that can't return an error easily
 func (backend *BlobsFiles) setLastError(err error) {
 	backend.lastErrMutex.Lock()
 	defer backend.lastErrMutex.Unlock()
@@ -442,6 +472,8 @@ func copyShards(i [][]byte) (o [][]byte) {
 }
 
 func (backend *BlobsFiles) checkBlobsFile(n int) error {
+	// FIXME(tsileo): actually repair the file
+	// TODO(tsileo): provide an method to do the check
 	pShards, err := backend.parityShards(n)
 	if err != nil {
 		// TODO(tsileo): log the error
@@ -464,18 +496,18 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 		return nil
 	}
 
-	if pShards == nil || len(pShards) != parityShards {
-		var l int
-		if pShards != nil {
-			l = len(pShards)
-		} else {
-			pShards = [][]byte{}
-		}
+	// if pShards == nil || len(pShards) != parityShards {
+	// 	var l int
+	// 	if pShards != nil {
+	// 		l = len(pShards)
+	// 	} else {
+	// 		pShards = [][]byte{}
+	// 	}
 
-		for i := 0; i < parityShards-l; i++ {
-			pShards = append(pShards, nil)
-		}
-	}
+	// 	for i := 0; i < parityShards-l; i++ {
+	// 		pShards = append(pShards, nil)
+	// 	}
+	// }
 
 	dataShardIndex := 0
 	if err != nil {
@@ -581,6 +613,48 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 	return fmt.Errorf("failed to recover")
 }
 
+func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
+	// Track if we created the file
+	if _, err := os.Stat(backend.filename(n)); os.IsNotExist(err) {
+		return fmt.Errorf("a rewrited version already exist")
+	}
+
+	filename := backend.filename(n) + ".restored"
+
+	// Open the file in rw mode
+	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return err
+	}
+
+	for _, shard := range shards[:dataShards] {
+		f.Write(shard)
+	}
+	for _, shard := range shards[dataShards:] {
+		_, parityBlobEncoded := backend.encodeBlob(shard, flagParityBlob)
+
+		n, err := f.Write(parityBlobEncoded)
+		if err != nil || n != len(parityBlobEncoded) {
+			return fmt.Errorf("Error writing parity blob (%v,%v)", err, n)
+		}
+	}
+
+	if err := f.Sync(); err != nil {
+		return err
+	}
+
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	// TODO(tsileo): display user info (introduce a new helper) to ask to remove the old blobsfile and rename the
+	// .restored.
+	// TODO(tsileo): also use this new helper (which should clean shutdown blobstahs) in case of blbo corruption
+	// detected.
+	// TODO(tsileo): also prove a call for corruptions to let wrapper provide a repaired blob from other source.
+	return nil
+}
+
 func (backend *BlobsFiles) dataShards(n int) ([][]byte, error) {
 	// Read the whole blobsfile data (except the parity blobs)
 	data := make([]byte, backend.maxBlobsFileSize)
@@ -598,48 +672,64 @@ func (backend *BlobsFiles) dataShards(n int) ([][]byte, error) {
 }
 
 func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
-	// FIXME(tsileo): try to read them backward if it fails (as we know the size will be maxBlobsFileSize/10), don't forget to reorder them
-	// Read the 2 parity shards at the ends of the file
-	if _, err := backend.files[n].Seek(backend.maxBlobsFileSize, os.SEEK_SET); err != nil {
-		return nil, fmt.Errorf("failed to seek to parity shards: %v", err)
-	}
-
 	blobsfile := backend.files[n]
 	parityBlobs := [][]byte{}
 
+	merr := &multiError{}
+
 	blobHash := make([]byte, hashSize)
-	blobSizeEncoded := make([]byte, 4)
-	flags := make([]byte, 2)
-
 	for i := 0; i < parityShards; i++ {
-		if _, err := blobsfile.Read(blobHash); err == io.EOF {
-			return parityBlobs, fmt.Errorf("missing parity blob, only found %d", len(parityBlobs))
+		offset := backend.maxBlobsFileSize + int64(i)*((backend.maxBlobsFileSize/int64(dataShards))+int64(hashSize+6))
+		if _, err := backend.files[n].Seek(offset, os.SEEK_SET); err != nil {
+			merr.Append(fmt.Errorf("failed to seek to parity shards: %v", err))
+			parityBlobs = append(parityBlobs, nil)
+			continue
 		}
 
-		if _, err := blobsfile.Read(flags); err != nil {
-			return parityBlobs, fmt.Errorf("failed to read flag: %v", err)
+		if _, err := blobsfile.Read(blobHash); err != nil {
+			if err == io.EOF {
+				merr.Append(fmt.Errorf("missing parity blob %d, only found %d", i, len(parityBlobs)+1))
+				parityBlobs = append(parityBlobs, nil)
+				continue
+			}
+			merr.Append(fmt.Errorf("failed to read the hash for parity blob %d: %v", i, err))
+			parityBlobs = append(parityBlobs, nil)
+			continue
 		}
 
-		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
-			return parityBlobs, err
+		// We skip the flags and the blob length as it may be corrupted and we know the length.
+		if _, err := blobsfile.Seek(offset+6+hashSize, os.SEEK_SET); err != nil {
+			merr.Append(fmt.Errorf("failed to seek to parity blob %d: %v", i, err))
+			parityBlobs = append(parityBlobs, nil)
+			continue
 		}
 
-		blobSize := binary.LittleEndian.Uint32(blobSizeEncoded)
-
-		blob := make([]byte, int(blobSize))
+		// Read the blob data
+		blobSize := int(backend.maxBlobsFileSize / dataShards)
+		blob := make([]byte, blobSize)
 		read, err := blobsfile.Read(blob)
 		if err != nil || read != int(blobSize) {
-			return parityBlobs, fmt.Errorf("error while reading raw blob: %v", err)
+			merr.Append(fmt.Errorf("error while reading raw blob %d: %v", i, err))
+			parityBlobs = append(parityBlobs, nil)
+			continue
 		}
 
+		// Check the data against the stored hash
 		hash := fmt.Sprintf("%x", blake2b.Sum256(blob))
 		if fmt.Sprintf("%x", blobHash) != hash {
-			return parityBlobs, errParityBlobCorrupted
+			merr.Append(errParityBlobCorrupted)
+			parityBlobs = append(parityBlobs, nil)
+			continue
 		}
 
 		parityBlobs = append(parityBlobs, blob)
 	}
-	return parityBlobs, nil
+
+	if merr.Nil() {
+		return parityBlobs, nil
+	}
+
+	return parityBlobs, merr
 }
 
 func (backend *BlobsFiles) checkParityBlobs(n int) error {
@@ -650,7 +740,8 @@ func (backend *BlobsFiles) checkParityBlobs(n int) error {
 
 	parityShards, err := backend.parityShards(n)
 	if err != nil {
-		return fmt.Errorf("failed to build parity shards: %v", err)
+		// We just log the error
+		fmt.Printf("failed to build parity shards: %v", err)
 	}
 
 	shards := append(dataShards, parityShards...)
