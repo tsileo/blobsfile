@@ -12,6 +12,8 @@ import (
 	"github.com/cznic/kv"
 )
 
+// FIXME(tsileo): optimize the index with the benchmark (not worth it if inserting the blob take longer)
+
 // MetaKey and BlobPosKey are used to namespace the DB keys.
 const (
 	metaKey byte = iota

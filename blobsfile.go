@@ -19,7 +19,6 @@ import (
 	"expvar"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,7 +252,6 @@ func New(opts *Opts) (*BlobsFiles, error) {
 	if err := backend.load(); err != nil {
 		panic(fmt.Errorf("Error loading %T: %v", backend, err))
 	}
-	// TODO(tsileo): fix the backend and prepare for multiple compressions algs
 	return backend, nil
 }
 
@@ -357,6 +355,8 @@ func (backend *BlobsFiles) getN() (int, error) {
 	return backend.index.getN()
 }
 
+// XXX(tsileo): does N really need to be saved in the index? it can help finding mismatch
+// if N < count(blobsfiles)
 func (backend *BlobsFiles) saveN() error {
 	return backend.index.setN(backend.n)
 }
@@ -375,14 +375,19 @@ func (backend *BlobsFiles) String() string {
 	return fmt.Sprintf("blobsfile-%v", backend.directory)
 }
 
+// scanBlobsFile scan a single BlobsFile (#n), and execute `iterFunc` for each indexed blob.
+// `iterFunc` is optional, and without it, this func will check the consistency of each blob, and return
+// a `corruptedError` if a blob is corrupted.
 func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, string, []byte) error) error {
 	corrupted := []*blobPos{}
 
+	// Ensure this BlosFile is open
 	err := backend.ropen(n)
 	if err != nil {
 		return err
 	}
 
+	// Seek at the start of data
 	offset := int64(headerSize)
 	blobsfile := backend.files[n]
 	if _, err := blobsfile.Seek(int64(headerSize), os.SEEK_SET); err != nil {
@@ -396,8 +401,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 	flags := make([]byte, 2)
 
 	for {
-		// fmt.Printf("blobsIndexed=%d\noffset=%d\n", blobsIndexed, offset)
-		// SCAN
+		// Read the hash
 		if _, err := blobsfile.Read(blobHash); err != nil {
 			if err == io.EOF {
 				break
@@ -405,19 +409,22 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			return &corruptedError{nil, offset, fmt.Errorf("failed to read hash: %v", err)}
 		}
 
+		// Read the 2 byte flags
 		if _, err := blobsfile.Read(flags); err != nil {
 			return &corruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
 
-		// If we reached the EOF blob, break
+		// If we reached the EOF blob, we're done
 		if flags[0] == flagEOF {
 			break
 		}
 
+		// Read the size of the blob
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
 			return &corruptedError{nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
 		}
 
+		// Read the actual blob
 		blobSize := int64(binary.LittleEndian.Uint32(blobSizeEncoded))
 		rawBlob := make([]byte, int(blobSize))
 		read, err := blobsfile.Read(rawBlob)
@@ -425,10 +432,12 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			return &corruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
 		}
 
+		// Build the `blobPos`
 		// XXX(tsileo): optional flag to `BlobPos`?
 		blobPos := &blobPos{n: n, offset: offset, size: int(blobSize)}
 		offset += blobOverhead + blobSize
 
+		// Decompress the blob if needed
 		var blob []byte
 		if backend.snappyCompression {
 			blobDecoded, err := snappy.Decode(nil, rawBlob)
@@ -442,6 +451,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 		// Store the real blob size (i.e. the decompressed size if the data is compressed)
 		blobPos.blobSize = len(blob)
 
+		// Ensure the blob is not corrupted
 		hash := fmt.Sprintf("%x", blake2b.Sum256(blob))
 		if fmt.Sprintf("%x", blobHash) == hash {
 			if iterFunc != nil {
@@ -451,6 +461,8 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			}
 			blobsIndexed++
 			// FIXME(tsileo): continue an try to repair it?
+			// XXX(tsileo): should a "solve the corruption issue by providing the real data from elsewhere" hook
+			// be here?
 		} else {
 			// better out an error and provides a CLI for repairing
 			corrupted = append(corrupted, blobPos)
@@ -471,9 +483,13 @@ func copyShards(i [][]byte) (o [][]byte) {
 	return o
 }
 
+func (backend *BlobsFiles) CheckBlobsFiles() error {
+	return backend.scan(nil)
+}
+
 func (backend *BlobsFiles) checkBlobsFile(n int) error {
 	// FIXME(tsileo): actually repair the file
-	// TODO(tsileo): provide an method to do the check
+	// TODO(tsileo): provide an exported method to do the check
 	pShards, err := backend.parityShards(n)
 	if err != nil {
 		// TODO(tsileo): log the error
@@ -615,11 +631,10 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 
 func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
 	// Track if we created the file
-	if _, err := os.Stat(backend.filename(n)); os.IsNotExist(err) {
+	filename := backend.filename(n) + ".restored"
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		return fmt.Errorf("a rewrited version already exist")
 	}
-
-	filename := backend.filename(n) + ".restored"
 
 	// Open the file in rw mode
 	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
@@ -671,6 +686,7 @@ func (backend *BlobsFiles) dataShards(n int) ([][]byte, error) {
 	return shards[:10], nil
 }
 
+// parityShards extract the "parity blob" at the end of the BlobsFile
 func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 	blobsfile := backend.files[n]
 	parityBlobs := [][]byte{}
@@ -679,6 +695,7 @@ func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 
 	blobHash := make([]byte, hashSize)
 	for i := 0; i < parityShards; i++ {
+		// Seek to the offset where the parity blob should be stored
 		offset := backend.maxBlobsFileSize + int64(i)*((backend.maxBlobsFileSize/int64(dataShards))+int64(hashSize+6))
 		if _, err := backend.files[n].Seek(offset, os.SEEK_SET); err != nil {
 			merr.Append(fmt.Errorf("failed to seek to parity shards: %v", err))
@@ -686,6 +703,7 @@ func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 			continue
 		}
 
+		// Read the hash of the blob
 		if _, err := blobsfile.Read(blobHash); err != nil {
 			if err == io.EOF {
 				merr.Append(fmt.Errorf("missing parity blob %d, only found %d", i, len(parityBlobs)+1))
@@ -732,6 +750,7 @@ func (backend *BlobsFiles) parityShards(n int) ([][]byte, error) {
 	return parityBlobs, merr
 }
 
+// checkParityBlobs check that the parity blobs and the the data shards can be verified (i.e integrity verification)
 func (backend *BlobsFiles) checkParityBlobs(n int) error {
 	dataShards, err := backend.dataShards(n)
 	if err != nil {
@@ -759,6 +778,7 @@ func (backend *BlobsFiles) checkParityBlobs(n int) error {
 	return nil
 }
 
+// scan executes the callback func `iterFunc` for each indexed blobs in all the available BlobsFiles.
 func (backend *BlobsFiles) scan(iterFunc func(*blobPos, byte, string, []byte) error) error {
 	n := 0
 	for {
@@ -918,7 +938,7 @@ func (backend *BlobsFiles) wopen(n int) error {
 func (backend *BlobsFiles) ropen(n int) error {
 	_, alreadyOpen := backend.files[n]
 	if alreadyOpen {
-		log.Printf("BlobsFileBackend: blobsfile %v already open", backend.filename(n))
+		// log.Printf("BlobsFileBackend: blobsfile %v already open", backend.filename(n))
 		return nil
 	}
 	if n > len(backend.files) {
@@ -952,11 +972,12 @@ func (backend *BlobsFiles) filename(n int) string {
 	return filepath.Join(backend.directory, fmt.Sprintf("blobs-%05d", n))
 }
 
-// writeParityBlobs compute and write the 4 parity shards using Reed-Solomon 10,4 and write them at
+// writeParityBlobs computes and writes the 4 parity shards using Reed-Solomon 10,4 and write them at
 // end the blobsfile, and write the "data size" (blobsfile size before writing the parity shards).
 func (backend *BlobsFiles) writeParityBlobs(f *os.File, size int) error {
 	start := time.Now()
 
+	// this will run in a goroutine, add the task in the wait group
 	backend.wg.Add(1)
 	defer backend.wg.Done()
 
@@ -1017,6 +1038,8 @@ func (backend *BlobsFiles) writeParityBlobs(f *os.File, size int) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
+
+	// XXX(tsileo): find a better way to log it/make this metrics accessible
 	duration := time.Since(start)
 	fmt.Printf("parity encoding done in %s\n", duration)
 	return nil
@@ -1043,6 +1066,8 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	if err != nil {
 		return err
 	}
+
+	// Do a quick check on the raw index directly, to prevent decoding the `blobPos` and not using it
 	bposdata, err := backend.index.db.Get(nil, formatKey(blobPosKey, bhash))
 	if err != nil {
 		return fmt.Errorf("error getting BlobPos: %v", err)
@@ -1275,6 +1300,8 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *Blob, start, end string, limi
 	if err != nil {
 		return err
 	}
+
+	// Enumerate the raw index directly
 	enum, _, err := backend.index.db.Seek(formatKey(blobPosKey, s))
 	if err != nil {
 		return err
