@@ -80,6 +80,12 @@ var (
 	errParityBlobCorrupted = errors.New("a parity blob is corrupted")
 )
 
+func checkFlag(f byte) {
+	if f == flagEOF || f == flagParityBlob {
+		panic(fmt.Sprintf("Unexpected blob flag %v", f))
+	}
+}
+
 // multiError wraps multiple errors in a single one
 type multiError struct {
 	errors []error
@@ -439,7 +445,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 
 		// Decompress the blob if needed
 		var blob []byte
-		if backend.snappyCompression {
+		if flags[0] == flagCompressed && backend.snappyCompression {
 			blobDecoded, err := snappy.Decode(nil, rawBlob)
 			if err != nil {
 				return &corruptedError{nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
@@ -1098,56 +1104,40 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 		}(f, int(backend.size))
 	}
 
-	// We're writing to two different files, so we can parallelized the writes
-	go func() {
-		if newBlobsFileNeeded {
-			// Archive this blobsfile, start by creating a new one
-			backend.n++
-			if err := backend.wopen(backend.n); err != nil {
-				panic(err)
-			}
-			// Re-open it (since we may need to read blobs from it)
-			if err := backend.ropen(backend.n); err != nil {
-				panic(err)
-			}
-			// Update the nimber of blobsfile in the index
-			if err := backend.saveN(); err != nil {
-				panic(err)
-			}
+	if newBlobsFileNeeded {
+		// Archive this blobsfile, start by creating a new one
+		backend.n++
+		if err := backend.wopen(backend.n); err != nil {
+			panic(err)
 		}
-
-		// Save the blob in the BlobsFile
-		n, err := backend.current.Write(blobEncoded)
-		backend.size += int64(len(blobEncoded))
-		if err != nil || n != len(blobEncoded) {
-			backend.putErr <- fmt.Errorf("Error writing blob (%v,%v)", err, n)
+		// Re-open it (since we may need to read blobs from it)
+		if err := backend.ropen(backend.n); err != nil {
+			panic(err)
 		}
-
-		// Fsync
-		if err = backend.current.Sync(); err != nil {
-			backend.putErr <- err
-			return
+		// Update the nimber of blobsfile in the index
+		if err := backend.saveN(); err != nil {
+			panic(err)
 		}
+	}
 
-		backend.putErr <- nil
-	}()
+	// Save the blob in the BlobsFile
+	offset := backend.size
+	n, err := backend.current.Write(blobEncoded)
+	backend.size += int64(len(blobEncoded))
+	if err != nil || n != len(blobEncoded) {
+		panic(err)
+	}
 
-	go func() {
-		// Save the blob in the index
-		blobPos := &blobPos{n: backend.n, offset: backend.size, size: blobSize, blobSize: len(data)}
-		if err := backend.index.setPos(hash, blobPos); err != nil {
-			backend.putErr <- err
-			return
-		}
+	// Fsync
+	if err = backend.current.Sync(); err != nil {
+		backend.putErr <- err
+		panic(err)
+	}
 
-		backend.putErr <- nil
-	}()
-
-	// Wait for the two goroutines to finish
-	for i := 0; i < 2; i++ {
-		if err := <-backend.putErr; err != nil {
-			return err
-		}
+	// Save the blob in the index
+	blobPos := &blobPos{n: backend.n, offset: offset, size: blobSize, blobSize: len(data)}
+	if err := backend.index.setPos(hash, blobPos); err != nil {
+		panic(err)
 	}
 
 	// Update the expvars
@@ -1172,6 +1162,7 @@ func (backend *BlobsFiles) Exists(hash string) (bool, error) {
 
 func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
 	flag = data[hashSize]
+	// checkFlag(flag)
 	compressionAlgFlag := data[hashSize+1]
 
 	size = int(binary.LittleEndian.Uint32(data[hashSize+2 : blobOverhead]))

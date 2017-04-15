@@ -180,10 +180,10 @@ func TestBlobsFilePutIdempotent(t *testing.T) {
 }
 
 func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
-	hashes, blobs := testBackendPutGetEnumerate(t, b, 50)
+	hashes, blobs := testBackendPutGetEnumerate(t, b, 500)
 	b.Close()
 	// Test we can still read everything when closing/reopening the blobsfile
 	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
