@@ -118,10 +118,53 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 	defer b.Close()
 	// Ensure we can recover from this corruption
 	cb := func(err error) error {
-		return b.checkBlobsFile(0)
+		if err != nil {
+			if err := b.scan(nil); err != nil {
+				return b.checkBlobsFile(err.(*corruptedError))
+			}
+			panic("should not happen")
+		}
+		return nil
 	}
 	testParity(t, b, false, cb)
+}
 
+func TestBlobsFileReedSolomonReindex(t *testing.T) {
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	check(err)
+	defer os.RemoveAll("./tmp_blobsfile_test")
+	testParity(t, b, true, nil)
+	fname := b.filename(0)
+	b.Close()
+	// // Corrupt the file
+
+	// f, err := os.OpenFile(fname, os.O_RDWR, 0755)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// FIXME(tsileo): test this
+	// if _, err := f.Seek(defaultMaxBlobsFileSize/10*3, os.SEEK_SET); err != nil {
+	// if _, err := f.Seek(defaultMaxBlobsFileSize/10, os.SEEK_SET); err != nil {
+	// if _, err := f.Seek(16000000/10*2, os.SEEK_SET); err != nil {
+	data, err := ioutil.ReadFile(fname)
+	if err != nil {
+		panic(err)
+	}
+	punchOffset := int64(16000000/10*5) - 10
+	t.Logf("punch at %d\n", punchOffset)
+	fmt.Printf("punch at %d/%d\n", punchOffset, 16000000)
+	ndata := []byte("blobsfilelol")
+	copy(data[punchOffset:punchOffset+int64(len(ndata))], ndata)
+	if err := ioutil.WriteFile(fname, []byte(data), 0644); err != nil {
+		panic(err)
+	}
+	// Reopen the db
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	check(err)
+	defer b.Close()
+	if err := b.RebuildIndex(); err != nil {
+		t.Errorf("failed to rebuild index: %v", err)
+	}
 }
 
 func TestBlobsFileReedSolomonWithCompression(t *testing.T) {
@@ -132,10 +175,14 @@ func TestBlobsFileReedSolomonWithCompression(t *testing.T) {
 	testParity(t, b, true, nil)
 }
 
-func testParity(t *testing.T, b *BlobsFiles, insert bool, cb func(error) error) {
+func testParity(t *testing.T, b *BlobsFiles, insert bool, cb func(error) error) ([]string, [][]byte) {
+	hashes := []string{}
+	blobs := [][]byte{}
 	if insert {
 		for i := 0; i < 31+10; i++ {
 			h, blob := randBlob(512000)
+			hashes = append(hashes, h)
+			blobs = append(blobs, blob)
 			if err := b.Put(h, blob); err != nil {
 				panic(err)
 			}
@@ -149,6 +196,7 @@ func testParity(t *testing.T, b *BlobsFiles, insert bool, cb func(error) error) 
 			panic(err)
 		}
 	}
+	return hashes, blobs
 }
 
 func randBlob(size int) (string, []byte) {
@@ -183,7 +231,7 @@ func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
 	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
-	hashes, blobs := testBackendPutGetEnumerate(t, b, 500)
+	hashes, blobs := testBackendPutGetEnumerateReindexGetEnumerate(t, b, 500)
 	b.Close()
 	// Test we can still read everything when closing/reopening the blobsfile
 	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
@@ -237,6 +285,18 @@ func backendPut(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte
 
 func testBackendPutGetEnumerate(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
 	hashes, blobs := backendPut(t, b, blobsCount)
+	testBackendGet(t, b, hashes, blobs)
+	testBackendEnumerate(t, b, hashes, "", "\xff")
+	return hashes, blobs
+}
+
+func testBackendPutGetEnumerateReindexGetEnumerate(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
+	hashes, blobs := backendPut(t, b, blobsCount)
+	testBackendGet(t, b, hashes, blobs)
+	testBackendEnumerate(t, b, hashes, "", "\xff")
+	if err := b.RebuildIndex(); err != nil {
+		panic(err)
+	}
 	testBackendGet(t, b, hashes, blobs)
 	testBackendEnumerate(t, b, hashes, "", "\xff")
 	return hashes, blobs

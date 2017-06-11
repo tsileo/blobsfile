@@ -123,6 +123,7 @@ func (me *multiError) Nil() bool {
 
 // corruptedError give more about the corruption of a BlobsFile
 type corruptedError struct {
+	n      int
 	blobs  []*blobPos
 	offset int64
 	err    error
@@ -452,12 +453,12 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 			if err == io.EOF {
 				break
 			}
-			return &corruptedError{nil, offset, fmt.Errorf("failed to read hash: %v", err)}
+			return &corruptedError{n, nil, offset, fmt.Errorf("failed to read hash: %v", err)}
 		}
 
 		// Read the 2 byte flags
 		if _, err := blobsfile.Read(flags); err != nil {
-			return &corruptedError{nil, offset, fmt.Errorf("failed to read flag: %v", err)}
+			return &corruptedError{n, nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
 
 		// If we reached the EOF blob, we're done
@@ -467,7 +468,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 
 		// Read the size of the blob
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
-			return &corruptedError{nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
+			return &corruptedError{n, nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
 		}
 
 		// Read the actual blob
@@ -475,7 +476,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 		rawBlob := make([]byte, int(blobSize))
 		read, err := blobsfile.Read(rawBlob)
 		if err != nil || read != int(blobSize) {
-			return &corruptedError{nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
+			return &corruptedError{n, nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
 		}
 
 		// Build the `blobPos`
@@ -487,7 +488,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 		if flags[0] == flagCompressed && backend.snappyCompression {
 			blobDecoded, err := snappy.Decode(nil, rawBlob)
 			if err != nil {
-				return &corruptedError{nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
+				return &corruptedError{n, nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
 			}
 			blob = blobDecoded
 		} else {
@@ -512,7 +513,7 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 	}
 
 	if len(corrupted) > 0 {
-		return &corruptedError{corrupted, -1, nil}
+		return &corruptedError{n, corrupted, -1, nil}
 	}
 
 	return nil
@@ -530,32 +531,19 @@ func (backend *BlobsFiles) CheckBlobsFiles() error {
 	return backend.scan(nil)
 }
 
-func (backend *BlobsFiles) checkBlobsFile(n int) error {
-	// FIXME(tsileo): actually repair the file
+func (backend *BlobsFiles) checkBlobsFile(cerr *corruptedError) error {
 	// TODO(tsileo): provide an exported method to do the check
+	n := cerr.n
 	pShards, err := backend.parityShards(n)
 	if err != nil {
 		// TODO(tsileo): log the error
 		fmt.Printf("parity shards err=%v\n", err)
 	}
 	parityCnt := len(pShards)
-	err = backend.scanBlobsFile(n, nil)
-	fmt.Printf("scan result=%v\n", err)
-	if err == nil && (pShards == nil || len(pShards) != parityShards) {
-		// We can rebuild the parity blobs if needed
-		// FIXME(tsileo): do it
-	}
-
-	if err != nil && (pShards == nil || len(pShards) == 0) {
-		return fmt.Errorf("no parity shards available, can't recover")
-	}
-
-	if err == nil {
-		fmt.Printf("noting to repair")
-		return nil
-	}
-
-	// if pShards == nil || len(pShards) != parityShards {
+	fmt.Printf("scan result=%v %+v\n", cerr, cerr)
+	// if err == nil && (pShards == nil || len(pShards) != parityShards) {
+	// 	// We can rebuild the parity blobs if needed
+	// 	// FIXME(tsileo): do it
 	// 	var l int
 	// 	if pShards != nil {
 	// 		l = len(pShards)
@@ -566,7 +554,166 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 	// 	for i := 0; i < parityShards-l; i++ {
 	// 		pShards = append(pShards, nil)
 	// 	}
+	// 	// TODO(tsileo): save the parity shards
 	// }
+
+	if pShards == nil || len(pShards) == 0 {
+		return fmt.Errorf("no parity shards available, can't recover")
+	}
+
+	dataShardIndex := 0
+	if cerr != nil {
+		badOffset := cerr.firstBadOffset()
+		fmt.Printf("badOffset: %v\n", badOffset)
+		dataShardIndex = firstCorruptedShard(badOffset, int(backend.maxBlobsFileSize)/dataShards)
+		fmt.Printf("dataShardIndex=%d\n", dataShardIndex)
+	}
+
+	// if err != nil {
+	// 	if cerr, ok := err.(*corruptedError); ok {
+	// 		badOffset := cerr.firstBadOffset()
+	// 		fmt.Printf("badOffset: %v\n", badOffset)
+	// 		dataShardIndex = firstCorruptedShard(badOffset, int(backend.maxBlobsFileSize)/dataShards)
+	// 		fmt.Printf("dataShardIndex=%d\n", dataShardIndex)
+	// 	}
+	// }
+
+	missing := []int{}
+	for i := dataShardIndex; i < 10; i++ {
+		missing = append(missing, i)
+	}
+	fmt.Printf("missing=%+v\n", missing)
+
+	dShards, err := backend.dataShards(n)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("try #1\n")
+	if len(missing) <= parityCnt {
+		shards := copyShards(append(dShards, pShards...))
+
+		for _, idx := range missing {
+			shards[idx] = nil
+		}
+
+		if err := backend.rse.Reconstruct(shards); err != nil {
+			return err
+		}
+
+		ok, err := backend.rse.Verify(shards)
+		if err != nil {
+			return err
+		}
+
+		if ok {
+			fmt.Printf("reconstruct successful\n")
+			if err := backend.rewriteBlobsFile(n, shards); err != nil {
+				return err
+			}
+
+			return nil
+		}
+		return fmt.Errorf("unrecoverable corruption")
+	}
+
+	fmt.Printf("try #2\n")
+	// Try one missing shards
+	for i := dataShardIndex; i < 10; i++ {
+		shards := copyShards(append(dShards, pShards...))
+		shards[i] = nil
+
+		if err := backend.rse.Reconstruct(shards); err != nil {
+			return err
+		}
+
+		ok, err := backend.rse.Verify(shards)
+		if err != nil {
+			return err
+		}
+
+		if ok {
+			fmt.Printf("reconstruct successful at %d\n", i)
+			if err := backend.rewriteBlobsFile(n, shards); err != nil {
+				return err
+			}
+
+			return nil
+		}
+	}
+
+	// TODO(tsileo): only do this check if the two parity blobs are here
+	fmt.Printf("try #3\n")
+	if len(pShards) >= 2 {
+		for i := dataShardIndex; i < 10; i++ {
+			for j := dataShardIndex; j < 10; j++ {
+				if j == i {
+					continue
+				}
+
+				shards := copyShards(append(dShards, pShards...))
+
+				shards[i] = nil
+				shards[j] = nil
+
+				if err := backend.rse.Reconstruct(shards); err != nil {
+					return err
+				}
+
+				ok, err := backend.rse.Verify(shards)
+				if err != nil {
+					return err
+				}
+
+				if ok {
+					if err := backend.rewriteBlobsFile(n, shards); err != nil {
+						return err
+					}
+
+					return nil
+				}
+			}
+		}
+	}
+
+	// XXX(tsileo): support for 4 failed parity shards
+	return fmt.Errorf("failed to recover")
+}
+
+func (backend *BlobsFiles) checkBlobsFile2(n int) error {
+	// TODO(tsileo): provide an exported method to do the check
+	pShards, err := backend.parityShards(n)
+	if err != nil {
+		// TODO(tsileo): log the error
+		fmt.Printf("parity shards err=%v\n", err)
+	}
+	parityCnt := len(pShards)
+	err = backend.scanBlobsFile(n, nil)
+	fmt.Printf("scan result=%v, %+v\n", err, err)
+	if err == nil && (pShards == nil || len(pShards) != parityShards) {
+		// We can rebuild the parity blobs if needed
+		// FIXME(tsileo): do it
+		var l int
+		if pShards != nil {
+			l = len(pShards)
+		} else {
+			pShards = [][]byte{}
+		}
+
+		for i := 0; i < parityShards-l; i++ {
+			pShards = append(pShards, nil)
+		}
+		// TODO(tsileo): save the parity shards
+	}
+
+	if err != nil && (pShards == nil || len(pShards) == 0) {
+		return fmt.Errorf("no parity shards available, can't recover")
+	}
+
+	if err == nil {
+		fmt.Printf("noting to repair")
+		return nil
+	}
 
 	dataShardIndex := 0
 	if err != nil {
@@ -605,10 +752,16 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 		if err != nil {
 			return err
 		}
+		if !ok {
+			return fmt.Errorf("failed to verify")
+		}
 
 		if ok {
-			// FIXME(tsileo): update/fix the data
 			fmt.Printf("reconstruct successful\n")
+			if err := backend.rewriteBlobsFile(n, shards); err != nil {
+				return err
+			}
+
 			return nil
 		}
 		return fmt.Errorf("unrecoverable corruption")
@@ -628,10 +781,16 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 		if err != nil {
 			return err
 		}
+		if !ok {
+			return fmt.Errorf("failed to verify")
+		}
 
 		if ok {
-			// FIXME(tsileo): update/fix the data
-			fmt.Printf("reconstruct successful\n")
+			if err := backend.rewriteBlobsFile(n, shards); err != nil {
+				return err
+			}
+			fmt.Printf("reconstruct successful at try %d \n%q\n", i, shards)
+
 			return nil
 		}
 	}
@@ -658,10 +817,16 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 				if err != nil {
 					return err
 				}
+				if !ok {
+					return fmt.Errorf("failed to verify")
+				}
 
 				if ok {
-					// FIXME(tsileo): update/fix the data
 					fmt.Printf("reconstruct successful\n")
+					if err := backend.rewriteBlobsFile(n, shards); err != nil {
+						return err
+					}
+
 					return nil
 				}
 			}
@@ -673,19 +838,31 @@ func (backend *BlobsFiles) checkBlobsFile(n int) error {
 }
 
 func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
-	// Track if we created the file
-	filename := backend.filename(n) + ".restored"
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		return fmt.Errorf("a rewrited version already exist")
+	if f, alreadyOpen := backend.files[n]; alreadyOpen {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		delete(backend.files, n)
 	}
 
+	// XXX(tsileo): check why this fails in test
+	// 	// Track if we created the file
+	// filename := backend.filename(n) + ".corrupted"
+	// 	if _, err := os.Stat(filename); os.IsNotExist(err) {
+	// 		return fmt.Errorf("a corrupted version already exist")
+	// 	}
+
+	// if err := os.Rename(backend.filename(n), filename); err != nil {
+	// return err
+	// }
+
 	// Open the file in rw mode
-	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+	f, err := os.OpenFile(backend.filename(n)+".new", os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
 	}
 
-	for _, shard := range shards[:dataShards] {
+	for _, shard := range shards[0:dataShards] {
 		f.Write(shard)
 	}
 	for _, shard := range shards[dataShards:] {
@@ -700,10 +877,24 @@ func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
+	f.Close()
 
-	if err := f.Close(); err != nil {
+	if err := os.Remove(backend.filename(n)); err != nil {
 		return err
 	}
+
+	if err := os.Rename(backend.filename(n)+".new", backend.filename(n)); err != nil {
+		return err
+	}
+
+	fmt.Printf("reopen\n")
+	if err := backend.ropen(n); err != nil {
+		return err
+	}
+	fmt.Printf("file rewrite done\n")
+	// if err := f.Close(); err != nil {
+	// 	return err
+	// }
 
 	// TODO(tsileo): display user info (introduce a new helper) to ask to remove the old blobsfile and rename the
 	// .restored.
@@ -719,6 +910,11 @@ func (backend *BlobsFiles) dataShards(n int) ([][]byte, error) {
 	if _, err := backend.files[n].ReadAt(data, 0); err != nil {
 		return nil, err
 	}
+
+	if !bytes.Equal(data[0:len(headerMagic)], []byte(headerMagic)) {
+		return nil, fmt.Errorf("bad magic when trying to creata data shard")
+	}
+	fmt.Printf("data shard magic OK\n")
 
 	// Rebuild the data shards using the data part of the blobsfile
 	shards, err := backend.rse.Split(data)
@@ -861,10 +1057,19 @@ func (backend *BlobsFiles) reindex() error {
 	}
 
 	if err := backend.scan(iterFunc); err != nil {
+		if cerr, ok := err.(*corruptedError); ok {
+			if err := backend.checkBlobsFile(cerr); err != nil {
+				return err
+			}
+
+			// If err was nil, then the recontruct was successful, we can try to reindex
+			if err := backend.RebuildIndex(); err != nil {
+				return err
+			}
+			return nil
+		}
 		return err
 	}
-
-	// FIXME(tsileo): check for CorruptedError and initialize a repair
 
 	if n == 0 {
 		return nil
@@ -998,6 +1203,7 @@ func (backend *BlobsFiles) ropen(n int) error {
 	// Ensure the header's magic is present
 	fmagic := make([]byte, len(headerMagic))
 	_, err = f.Read(fmagic)
+	fmt.Printf("fmagic=%+v\n", fmagic)
 	if err != nil || headerMagic != string(fmagic) {
 		return fmt.Errorf("magic not found in BlobsFile: %v or header not matching", err)
 	}
@@ -1083,9 +1289,7 @@ func (backend *BlobsFiles) writeParityBlobs(f *os.File, size int) error {
 		return err
 	}
 
-	// XXX(tsileo): find a better way to log it/make this metrics accessible
-	duration := time.Since(start)
-	fmt.Printf("parity encoding done in %s\n", duration)
+	backend.log("parity blobs created successfully (in %s)", time.Since(start))
 	return nil
 }
 
