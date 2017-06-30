@@ -154,6 +154,22 @@ func (index *blobsIndex) deletePos(hexHash string) error {
 	return index.db.Delete(formatKey(blobPosKey, hash))
 }
 
+// checkPos checks if a blobPos exists for the given hash (without decoding it).
+func (index *blobsIndex) checkPos(hexHash string) (bool, error) {
+	hash, err := hex.DecodeString(hexHash)
+	if err != nil {
+		return false, err
+	}
+	data, err := index.db.Get(nil, formatKey(blobPosKey, hash))
+	if err != nil {
+		return false, fmt.Errorf("error getting BlobPos: %v", err)
+	}
+	if data == nil || len(data) == 0 {
+		return false, nil
+	}
+	return true, nil
+}
+
 // getPos retrieve the stored blobPos for the given hash.
 func (index *blobsIndex) getPos(hexHash string) (*blobPos, error) {
 	hash, err := hex.DecodeString(hexHash)

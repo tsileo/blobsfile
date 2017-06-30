@@ -4,7 +4,7 @@
 &nbsp; &nbsp;[![Godoc Reference](https://godoc.org/a4.io/blobsfile?status.svg)](https://godoc.org/a4.io/blobsfile)
 &nbsp; &nbsp;[![Go Report Card](https://goreportcard.com/badge/a4.io/blobsfile)](https://goreportcard.com/report/a4.io/blobsfile)
 
-*BlobsFile* is an append-only (i.e. no update and no delete) content-addressed *blob store* (using [BLAKE2](https://blake2.net/) as hash function).
+*BlobsFile* is an append-only (i.e. no update and no delete) content-addressed *blob store* (using [BLAKE2b](https://blake2.net/) as hash function).
 
 It draws inspiration from Facebook's [Haystack](http://202.118.11.61/papers/case%20studies/facebook.pdf), blobs are stored in a flat file and indexed in a small [kv](https://github.com/cznic/kv) database.
 

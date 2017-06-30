@@ -680,163 +680,6 @@ func (backend *BlobsFiles) checkBlobsFile(cerr *corruptedError) error {
 	return fmt.Errorf("failed to recover")
 }
 
-func (backend *BlobsFiles) checkBlobsFile2(n int) error {
-	// TODO(tsileo): provide an exported method to do the check
-	pShards, err := backend.parityShards(n)
-	if err != nil {
-		// TODO(tsileo): log the error
-		fmt.Printf("parity shards err=%v\n", err)
-	}
-	parityCnt := len(pShards)
-	err = backend.scanBlobsFile(n, nil)
-	fmt.Printf("scan result=%v, %+v\n", err, err)
-	if err == nil && (pShards == nil || len(pShards) != parityShards) {
-		// We can rebuild the parity blobs if needed
-		// FIXME(tsileo): do it
-		var l int
-		if pShards != nil {
-			l = len(pShards)
-		} else {
-			pShards = [][]byte{}
-		}
-
-		for i := 0; i < parityShards-l; i++ {
-			pShards = append(pShards, nil)
-		}
-		// TODO(tsileo): save the parity shards
-	}
-
-	if err != nil && (pShards == nil || len(pShards) == 0) {
-		return fmt.Errorf("no parity shards available, can't recover")
-	}
-
-	if err == nil {
-		fmt.Printf("noting to repair")
-		return nil
-	}
-
-	dataShardIndex := 0
-	if err != nil {
-		if cerr, ok := err.(*corruptedError); ok {
-			badOffset := cerr.firstBadOffset()
-			fmt.Printf("badOffset: %v\n", badOffset)
-			dataShardIndex = firstCorruptedShard(badOffset, int(backend.maxBlobsFileSize)/dataShards)
-			fmt.Printf("dataShardIndex=%d\n", dataShardIndex)
-		}
-	}
-
-	missing := []int{}
-	for i := dataShardIndex; i < 10; i++ {
-		missing = append(missing, i)
-	}
-	fmt.Printf("missing=%+v\n", missing)
-
-	dShards, err := backend.dataShards(n)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("try #1\n")
-	if len(missing) <= parityCnt {
-		shards := copyShards(append(dShards, pShards...))
-
-		for _, idx := range missing {
-			shards[idx] = nil
-		}
-
-		if err := backend.rse.Reconstruct(shards); err != nil {
-			return err
-		}
-
-		ok, err := backend.rse.Verify(shards)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("failed to verify")
-		}
-
-		if ok {
-			fmt.Printf("reconstruct successful\n")
-			if err := backend.rewriteBlobsFile(n, shards); err != nil {
-				return err
-			}
-
-			return nil
-		}
-		return fmt.Errorf("unrecoverable corruption")
-	}
-
-	fmt.Printf("try #2\n")
-	// Try one missing shards
-	for i := dataShardIndex; i < 10; i++ {
-		shards := copyShards(append(dShards, pShards...))
-		shards[i] = nil
-
-		if err := backend.rse.Reconstruct(shards); err != nil {
-			return err
-		}
-
-		ok, err := backend.rse.Verify(shards)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("failed to verify")
-		}
-
-		if ok {
-			if err := backend.rewriteBlobsFile(n, shards); err != nil {
-				return err
-			}
-			fmt.Printf("reconstruct successful at try %d \n%q\n", i, shards)
-
-			return nil
-		}
-	}
-
-	// TODO(tsileo): only do this check if the two parity blobs are here
-	fmt.Printf("try #3\n")
-	if len(pShards) >= 2 {
-		for i := dataShardIndex; i < 10; i++ {
-			for j := dataShardIndex; j < 10; j++ {
-				if j == i {
-					continue
-				}
-
-				shards := copyShards(append(dShards, pShards...))
-
-				shards[i] = nil
-				shards[j] = nil
-
-				if err := backend.rse.Reconstruct(shards); err != nil {
-					return err
-				}
-
-				ok, err := backend.rse.Verify(shards)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					return fmt.Errorf("failed to verify")
-				}
-
-				if ok {
-					fmt.Printf("reconstruct successful\n")
-					if err := backend.rewriteBlobsFile(n, shards); err != nil {
-						return err
-					}
-
-					return nil
-				}
-			}
-		}
-	}
-
-	// XXX(tsileo): support for 4 failed parity shards
-	return fmt.Errorf("failed to recover")
-}
-
 func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
 	if f, alreadyOpen := backend.files[n]; alreadyOpen {
 		if err := f.Close(); err != nil {
@@ -845,23 +688,13 @@ func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
 		delete(backend.files, n)
 	}
 
-	// XXX(tsileo): check why this fails in test
-	// 	// Track if we created the file
-	// filename := backend.filename(n) + ".corrupted"
-	// 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-	// 		return fmt.Errorf("a corrupted version already exist")
-	// 	}
-
-	// if err := os.Rename(backend.filename(n), filename); err != nil {
-	// return err
-	// }
-
-	// Open the file in rw mode
+	// Create a new temporary file
 	f, err := os.OpenFile(backend.filename(n)+".new", os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
 	}
 
+	// Re-create the healed Blobsfile
 	for _, shard := range shards[0:dataShards] {
 		f.Write(shard)
 	}
@@ -879,10 +712,12 @@ func (backend *BlobsFiles) rewriteBlobsFile(n int, shards [][]byte) error {
 	}
 	f.Close()
 
+	// Remove the corrupted BlobsFile
 	if err := os.Remove(backend.filename(n)); err != nil {
 		return err
 	}
 
+	// Rename our newly created BlobsFile to replace the old one
 	if err := os.Rename(backend.filename(n)+".new", backend.filename(n)); err != nil {
 		return err
 	}
@@ -1305,23 +1140,17 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 	backend.wg.Add(1)
 	defer backend.wg.Done()
 
+	// Check if any async error is stored
 	if err := backend.lastError(); err != nil {
 		return err
 	}
 
-	// 	// Ensure the data is not already stored
-	bhash, err := hex.DecodeString(hash)
+	// Ensure the data is not already stored
+	exists, err := backend.index.checkPos(hash)
 	if err != nil {
 		return err
 	}
-
-	// Do a quick check on the raw index directly, to prevent decoding the `blobPos` and not using it
-	bposdata, err := backend.index.db.Get(nil, formatKey(blobPosKey, bhash))
-	if err != nil {
-		return fmt.Errorf("error getting BlobPos: %v", err)
-	}
-	// The index contains data, the blob is already stored
-	if bposdata != nil {
+	if exists {
 		return nil
 	}
 
@@ -1389,16 +1218,12 @@ func (backend *BlobsFiles) Put(hash string, data []byte) (err error) {
 
 // Exists return true if the blobs is already stored.
 func (backend *BlobsFiles) Exists(hash string) (bool, error) {
-	blobPos, err := backend.index.getPos(hash)
+	res, err := backend.index.checkPos(hash)
 	if err != nil {
 		return false, err
 	}
 
-	if blobPos != nil {
-		return true, nil
-	}
-
-	return false, nil
+	return res, nil
 }
 
 func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
