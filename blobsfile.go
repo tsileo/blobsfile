@@ -1373,7 +1373,7 @@ func (backend *BlobsFiles) Enumerate(blobs chan<- *Blob, start, end string, limi
 		}
 
 		hash := hex.EncodeToString(k[1:])
-		if bytes.Compare([]byte(hash), endBytes) > 0 || (limit != 0 && i > limit) {
+		if bytes.Compare([]byte(hash), endBytes) > 0 || (limit != 0 && i == limit) {
 			return nil
 		}
 
