@@ -1226,6 +1226,22 @@ func (backend *BlobsFiles) Exists(hash string) (bool, error) {
 	return res, nil
 }
 
+func (backend *BlobsFiles) getEncoded(data []byte) (int, []byte, byte) {
+	flag := data[hashSize]
+	// checkFlag(flag)
+	compressionAlgFlag := data[hashSize+1]
+
+	size := int(binary.LittleEndian.Uint32(data[hashSize+2 : blobOverhead]))
+
+	if backend.snappyCompression && flag == flagCompressed && compressionAlgFlag == flagSnappy {
+		// The blob is already snappy encoded, return it directly
+		return size, data[blobOverhead:], flagBlob
+	}
+
+	// The blob was not snappy encoded, do it before returning
+	return size, snappy.Encode(nil, data[blobOverhead:]), flag
+}
+
 func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag byte) {
 	flag = data[hashSize]
 	// checkFlag(flag)
@@ -1296,6 +1312,52 @@ func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []
 // BlobPos return the index entry for the given hash
 func (backend *BlobsFiles) blobPos(hash string) (*blobPos, error) {
 	return backend.index.getPos(hash)
+}
+
+// Get returns the blob for the given hash.
+// FIXME(tsileo): test this
+func (backend *BlobsFiles) GetEncoded(hash string) ([]byte, error) {
+	if err := backend.lastError(); err != nil {
+		return nil, err
+	}
+
+	// Fetch the index entry
+	blobPos, err := backend.index.getPos(hash)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching GetPos: %v", err)
+	}
+
+	// No index entry found, returns an error
+	if blobPos == nil {
+		if err == nil {
+			return nil, ErrBlobNotFound
+		}
+		return nil, err
+	}
+
+	// Read the encoded blob from the BlobsFile
+	data := make([]byte, blobPos.size+blobOverhead)
+	n, err := backend.files[blobPos.n].ReadAt(data, int64(blobPos.offset))
+	if err != nil {
+		return nil, fmt.Errorf("error reading blob: %v / blobsfile: %+v", err, backend.files[blobPos.n])
+	}
+
+	// Ensure the data length is expcted
+	if n != blobPos.size+blobOverhead {
+		return nil, fmt.Errorf("error reading blob %v, read %v, expected %v+%v", hash, n, blobPos.size, blobOverhead)
+	}
+
+	// Decode the blob
+	blobSize, blob, _ := backend.getEncoded(data)
+	if blobSize != blobPos.size {
+		return nil, fmt.Errorf("bad blob %v encoded size, got %v, expected %v", hash, n, blobSize)
+	}
+
+	// Update the expvars
+	bytesDownloaded.Add(backend.directory, int64(blobSize))
+	blobsUploaded.Add(backend.directory, 1)
+
+	return blob, nil
 }
 
 // Get returns the blob for the given hash.
