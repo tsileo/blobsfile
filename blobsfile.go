@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dchest/blake2b"
 	"github.com/golang/snappy"
 	"github.com/klauspost/reedsolomon"
+	"golang.org/x/crypto/blake2b"
 )
 
 const (

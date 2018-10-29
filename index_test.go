@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dchest/blake2b"
+	"golang.org/x/crypto/blake2b"
 )
 
 func TestBlobsIndexBasic(t *testing.T) {
