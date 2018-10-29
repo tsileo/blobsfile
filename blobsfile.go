@@ -1261,7 +1261,10 @@ func (backend *BlobsFiles) decodeBlob(data []byte) (size int, blob []byte, flag 
 		blob = blobDecoded
 	}
 
-	h := blake2b.New256()
+	h, err := blake2b.New256(nil)
+	if err != nil {
+		panic(err)
+	}
 	h.Write(blob)
 
 	if !bytes.Equal(h.Sum(nil), data[0:hashSize]) {
@@ -1281,7 +1284,10 @@ func makeHeaderEOF(padSize int64) (h []byte) {
 }
 
 func (backend *BlobsFiles) encodeBlob(blob []byte, flag byte) (size int, data []byte) {
-	h := blake2b.New256()
+	h, err := blake2b.New256(nil)
+	if err != nil {
+		panic(err)
+	}
 	h.Write(blob)
 
 	var compressionAlgFlag byte
