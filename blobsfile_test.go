@@ -21,7 +21,7 @@ func check(e error) {
 }
 
 func BenchmarkBlobsFilePut512B(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -29,7 +29,7 @@ func BenchmarkBlobsFilePut512B(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512KB(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -37,7 +37,7 @@ func BenchmarkBlobsFilePut512KB(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut2MB(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -45,7 +45,7 @@ func BenchmarkBlobsFilePut2MB(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512BCompressed(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -53,7 +53,7 @@ func BenchmarkBlobsFilePut512BCompressed(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512KBCompressed(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -61,7 +61,7 @@ func BenchmarkBlobsFilePut512KBCompressed(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut2MBCompressed(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -84,7 +84,7 @@ func benchmarkBlobsFilePut(back *BlobsFiles, blobSize int, b *testing.B) {
 }
 
 func TestBlobsFileReedSolomon(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", BlobsFileSize: 16000000})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	testParity(t, b, true, nil)
@@ -113,7 +113,7 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 		panic(err)
 	}
 	// Reopen the db
-	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", BlobsFileSize: 16000000})
 	check(err)
 	defer b.Close()
 	// Ensure we can recover from this corruption
@@ -130,7 +130,7 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 }
 
 func TestBlobsFileReedSolomonReindex(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", BlobsFileSize: 16000000})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	testParity(t, b, true, nil)
@@ -159,7 +159,7 @@ func TestBlobsFileReedSolomonReindex(t *testing.T) {
 		panic(err)
 	}
 	// Reopen the db
-	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", BlobsFileSize: 16000000})
 	check(err)
 	defer b.Close()
 	if err := b.RebuildIndex(); err != nil {
@@ -168,7 +168,7 @@ func TestBlobsFileReedSolomonReindex(t *testing.T) {
 }
 
 func TestBlobsFileReedSolomonWithCompression(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true, BlobsFileSize: 16000000})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", BlobsFileSize: 16000000})
 	check(err)
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -208,7 +208,7 @@ func randBlob(size int) (string, []byte) {
 }
 
 func TestBlobsFilePutIdempotent(t *testing.T) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Snappy})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -228,7 +228,7 @@ func TestBlobsFilePutIdempotent(t *testing.T) {
 }
 
 func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
 	hashes, blobs := testBackendPutGetEnumerateReindexGetEnumerate(t, b, 500)
@@ -252,7 +252,7 @@ func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
 		panic(err)
 	}
 	// Try with the index and removed and test re-indexing
-	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
 	check(err)
 	if err := b.RebuildIndex(); err != nil {
 		panic(err)
@@ -346,7 +346,7 @@ func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string, start, e
 }
 
 func TestBlobsFileBlobEncodingNoCompression(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", DisableCompression: true})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
 	defer b.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
