@@ -38,16 +38,6 @@ func TestBlobsIndexBasic(t *testing.T) {
 	if n2 != 100 {
 		t.Errorf("Error GetN, got %v, expected 100", n2)
 	}
-
-	for i := 0; i < 100; i++ {
-		err = index.incInt64("ok", 100)
-		check(err)
-	}
-	res, err := index.getInt64("ok")
-	check(err)
-	if res != 10000 {
-		t.Errorf("expected 10000, got %d", res)
-	}
 }
 
 func TestBlobsIndex(t *testing.T) {

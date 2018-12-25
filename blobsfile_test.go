@@ -45,7 +45,7 @@ func BenchmarkBlobsFilePut2MB(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512BCompressed(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Snappy})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -53,7 +53,7 @@ func BenchmarkBlobsFilePut512BCompressed(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut512KBCompressed(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Snappy})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -61,7 +61,7 @@ func BenchmarkBlobsFilePut512KBCompressed(b *testing.B) {
 }
 
 func BenchmarkBlobsFilePut2MBCompressed(b *testing.B) {
-	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
+	back, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Snappy})
 	check(err)
 	defer back.Close()
 	defer os.RemoveAll("./tmp_blobsfile_test")
@@ -228,10 +228,10 @@ func TestBlobsFilePutIdempotent(t *testing.T) {
 }
 
 func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
-	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
+	b, err := New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Snappy})
 	check(err)
 	defer os.RemoveAll("./tmp_blobsfile_test")
-	hashes, blobs := testBackendPutGetEnumerateReindexGetEnumerate(t, b, 500)
+	hashes, blobs := testBackendPutGetEnumerateReindexGetEnumerate(t, b, 100)
 	b.Close()
 	// Test we can still read everything when closing/reopening the blobsfile
 	b, err = New(&Opts{Directory: "./tmp_blobsfile_test"})
@@ -243,21 +243,21 @@ func TestBlobsFileBlobPutGetEnumerate(t *testing.T) {
 		}
 		prefixes[h[0:2]] = append(prefixes[h[0:2]], h)
 	}
-	testBackendEnumerate(t, b, hashes, "", "\xff")
+	testBackendEnumerate(t, b, hashes, "", "\xfe")
 	for prefix, phashes := range prefixes {
-		testBackendEnumerate(t, b, phashes, prefix, prefix+"\xff")
+		testBackendEnumerate2(t, b, phashes, prefix, "")
 	}
 	testBackendGet(t, b, hashes, blobs)
 	if err := b.Close(); err != nil {
 		panic(err)
 	}
 	// Try with the index and removed and test re-indexing
-	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Zstandard})
+	b, err = New(&Opts{Directory: "./tmp_blobsfile_test", Compression: Snappy})
 	check(err)
 	if err := b.RebuildIndex(); err != nil {
 		panic(err)
 	}
-	testBackendEnumerate(t, b, hashes, "", "\xff")
+	testBackendEnumerate(t, b, hashes, "", "\xfe")
 	testBackendGet(t, b, hashes, blobs)
 }
 
@@ -286,19 +286,19 @@ func backendPut(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte
 func testBackendPutGetEnumerate(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
 	hashes, blobs := backendPut(t, b, blobsCount)
 	testBackendGet(t, b, hashes, blobs)
-	testBackendEnumerate(t, b, hashes, "", "\xff")
+	testBackendEnumerate(t, b, hashes, "", "\xfe")
 	return hashes, blobs
 }
 
 func testBackendPutGetEnumerateReindexGetEnumerate(t *testing.T, b *BlobsFiles, blobsCount int) ([]string, [][]byte) {
 	hashes, blobs := backendPut(t, b, blobsCount)
 	testBackendGet(t, b, hashes, blobs)
-	testBackendEnumerate(t, b, hashes, "", "\xff")
+	testBackendEnumerate(t, b, hashes, "", "\xfe")
 	if err := b.RebuildIndex(); err != nil {
 		panic(err)
 	}
 	testBackendGet(t, b, hashes, blobs)
-	testBackendEnumerate(t, b, hashes, "", "\xff")
+	testBackendEnumerate(t, b, hashes, "", "\xfe")
 	return hashes, blobs
 }
 
@@ -322,6 +322,29 @@ func testBackendGet(t *testing.T, b *BlobsFiles, hashes []string, blobs [][]byte
 	}
 }
 
+func testBackendEnumerate2(t *testing.T, b *BlobsFiles, hashes []string, start, end string) []string {
+	sort.Strings(hashes)
+	bchan := make(chan *Blob)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- b.EnumeratePrefix(bchan, start, 0)
+	}()
+	enumHashes := []string{}
+	for ref := range bchan {
+		enumHashes = append(enumHashes, ref.Hash)
+	}
+	if err := <-errc; err != nil {
+		panic(err)
+	}
+	if !sort.StringsAreSorted(enumHashes) {
+		t.Errorf("enum hashes should already be sorted")
+	}
+	if !reflect.DeepEqual(hashes, enumHashes) {
+		t.Errorf("bad enumerate results %q %q", hashes, enumHashes)
+	}
+	return enumHashes
+}
+
 func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string, start, end string) []string {
 	sort.Strings(hashes)
 	bchan := make(chan *Blob)
@@ -340,7 +363,7 @@ func testBackendEnumerate(t *testing.T, b *BlobsFiles, hashes []string, start, e
 		t.Errorf("enum hashes should already be sorted")
 	}
 	if !reflect.DeepEqual(hashes, enumHashes) {
-		t.Errorf("bad enumerate results")
+		t.Errorf("bad enumerate results %q %q", hashes, enumHashes)
 	}
 	return enumHashes
 }
