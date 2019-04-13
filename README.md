@@ -1,6 +1,6 @@
 # BlobsFile
 
-[![Build Status](https://travis-ci.org/tsileo/blobsfile.svg?branch=master)](https://travis-ci.org/tsileo/blobsfile)
+[![Build Status](https://d.a4.io/api/badges/tsileo/blobsfile/status.svg)](https://d.a4.io/tsileo/blobsfile)
 &nbsp; &nbsp;[![Godoc Reference](https://godoc.org/a4.io/blobsfile?status.svg)](https://godoc.org/a4.io/blobsfile)
 &nbsp; &nbsp;[![Go Report Card](https://goreportcard.com/badge/a4.io/blobsfile)](https://goreportcard.com/report/a4.io/blobsfile)
 
