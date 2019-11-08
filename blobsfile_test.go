@@ -127,6 +127,8 @@ func TestBlobsFileReedSolomon(t *testing.T) {
 		return nil
 	}
 	testParity(t, b, false, cb)
+	packs := b.SealedPacks()
+	t.Logf("packs=%+v", packs)
 }
 
 func TestBlobsFileReedSolomonReindex(t *testing.T) {
@@ -399,4 +401,6 @@ func TestBlobsFileBlobEncoding(t *testing.T) {
 	if !bytes.Equal(blob, blob2) {
 		t.Errorf("Error blob encoding, got size:%v, expected:512, got blob:%v, expected:%v", size, blob2[:10], blob[:10])
 	}
+	packs := b.SealedPacks()
+	t.Logf("packs=%+v", packs)
 }
