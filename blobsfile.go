@@ -309,7 +309,7 @@ func (backend *BlobsFiles) getConfirmation(msg string) (bool, error) {
 
 func (backend *BlobsFiles) SealedPacks() []string {
 	packs := []string{}
-	for i := 0; i < backend.n-1; i++ {
+	for i := 0; i < backend.n; i++ {
 		packs = append(packs, backend.filename(i))
 	}
 	return packs
@@ -540,6 +540,65 @@ func (backend *BlobsFiles) scanBlobsFile(n int, iterFunc func(*blobPos, byte, st
 	}
 
 	return nil
+}
+
+// scanBlobsFile scan a single BlobsFile (#n), and execute `iterFunc` for each indexed blob.
+// `iterFunc` is optional, and without it, this func will check the consistency of each blob, and return
+// a `corruptedError` if a blob is corrupted.
+func ScanBlobsFile(path string) ([]string, error) {
+	hashes := []string{}
+	blobsfile, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer blobsfile.Close()
+	// Seek at the start of data
+	offset := int64(headerSize)
+	if _, err := blobsfile.Seek(int64(headerSize), os.SEEK_SET); err != nil {
+		return nil, err
+	}
+
+	blobHash := make([]byte, hashSize)
+	blobSizeEncoded := make([]byte, 4)
+	flags := make([]byte, 2)
+
+	for {
+		// Read the hash
+		if _, err := blobsfile.Read(blobHash); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+
+		// Read the 2 byte flags
+		if _, err := blobsfile.Read(flags); err != nil {
+			return nil, err
+		}
+
+		// If we reached the EOF blob, we're done
+		if flags[0] == flagEOF {
+			break
+		}
+
+		// Read the size of the blob
+		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
+			return nil, err
+		}
+
+		// Read the actual blob
+		blobSize := int64(binary.LittleEndian.Uint32(blobSizeEncoded))
+		// Build the `blobPos`
+		offset += blobOverhead + blobSize
+
+		hashes = append(hashes, fmt.Sprintf("%x", blake2b.Sum256(blobHash)))
+
+		if _, err := blobsfile.Seek(offset, os.SEEK_SET); err != nil {
+			return nil, err
+		}
+	}
+
+	return hashes, nil
 }
 
 func copyShards(i [][]byte) (o [][]byte) {
