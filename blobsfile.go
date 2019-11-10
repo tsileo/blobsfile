@@ -552,11 +552,14 @@ func ScanBlobsFile(path string) ([]string, error) {
 		return nil, err
 	}
 	defer blobsfile.Close()
+
 	// Seek at the start of data
 	offset := int64(headerSize)
 	if _, err := blobsfile.Seek(int64(headerSize), os.SEEK_SET); err != nil {
 		return nil, err
 	}
+
+	blobsIndexed := 0
 
 	blobHash := make([]byte, hashSize)
 	blobSizeEncoded := make([]byte, 4)
@@ -568,12 +571,12 @@ func ScanBlobsFile(path string) ([]string, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, err
+			return nil, &corruptedError{0, nil, offset, fmt.Errorf("failed to read hash: %v", err)}
 		}
 
 		// Read the 2 byte flags
 		if _, err := blobsfile.Read(flags); err != nil {
-			return nil, err
+			return nil, &corruptedError{0, nil, offset, fmt.Errorf("failed to read flag: %v", err)}
 		}
 
 		// If we reached the EOF blob, we're done
@@ -583,18 +586,45 @@ func ScanBlobsFile(path string) ([]string, error) {
 
 		// Read the size of the blob
 		if _, err := blobsfile.Read(blobSizeEncoded); err != nil {
-			return nil, err
+			return nil, &corruptedError{0, nil, offset, fmt.Errorf("failed to read blob size: %v", err)}
 		}
 
 		// Read the actual blob
 		blobSize := int64(binary.LittleEndian.Uint32(blobSizeEncoded))
+		rawBlob := make([]byte, int(blobSize))
+		read, err := blobsfile.Read(rawBlob)
+		if err != nil || read != int(blobSize) {
+			return nil, &corruptedError{0, nil, offset, fmt.Errorf("error while reading raw blob: %v", err)}
+		}
+
 		// Build the `blobPos`
 		offset += blobOverhead + blobSize
 
-		hashes = append(hashes, fmt.Sprintf("%x", blake2b.Sum256(blobHash)))
+		// Decompress the blob if needed
+		var blob []byte
+		if flags[0] == flagCompressed && flags[1] != 0 {
+			var err error
+			var blobDecoded []byte
+			switch CompressionAlgorithm(flags[1]) {
+			case Snappy:
+				blobDecoded, err = snappy.Decode(nil, rawBlob)
+			}
+			if err != nil {
+				return nil, &corruptedError{0, nil, offset, fmt.Errorf("failed to decode blob: %v %v %v", err, blobSize, flags)}
+			}
+			blob = blobDecoded
 
-		if _, err := blobsfile.Seek(offset, os.SEEK_SET); err != nil {
-			return nil, err
+		} else {
+			blob = rawBlob
+		}
+
+		// Ensure the blob is not corrupted
+		hash := fmt.Sprintf("%x", blake2b.Sum256(blob))
+		if fmt.Sprintf("%x", blobHash) == hash {
+			hashes = append(hashes, hash)
+			blobsIndexed++
+		} else {
+			panic("corrupted")
 		}
 	}
 

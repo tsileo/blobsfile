@@ -20,6 +20,12 @@ func check(e error) {
 	}
 }
 
+func TestScan(t *testing.T) {
+	blobs, err := ScanBlobsFile("/home/thomas/Proj/blobstash/blobstash_yzadat1111111/blobs/blobs-00000")
+	check(err)
+	t.Logf("blobs=%q", blobs)
+}
+
 func BenchmarkBlobsFilePut512B(b *testing.B) {
 	back, err := New(&Opts{Directory: "./tmp_blobsfile_test"})
 	check(err)
